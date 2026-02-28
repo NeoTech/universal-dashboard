@@ -1,0 +1,62 @@
+:root {
+  /* ── Spacing ── */
+  --twm-gap-inner: 8px;
+  --twm-gap-outer: 0px;
+  --twm-gap-handle: 4px;
+
+  /* ── Colors: dark theme baseline ── */
+  --twm-color-bg:       #0d0d0d;
+  --twm-color-surface:  #181818;
+  --twm-color-surface2: #222222;
+  --twm-color-border:   #2e2e2e;
+  --twm-color-text:     #e8e8e8;
+  --twm-color-text-dim: #888888;
+  --twm-color-accent:   #4c9ee8;
+  --twm-color-accent-hover: #5eb0f0;
+  --twm-color-danger:   #e84c4c;
+  --twm-color-success:  #3dba6e;
+  --twm-color-warning:  #e8a84c;
+  --twm-color-hint:     #666666;
+
+  /* ── Typography ── */
+  --twm-font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  --twm-font-mono:   "JetBrains Mono", "Fira Code", monospace;
+  --twm-font-size-xs:   11px;
+  --twm-font-size-sm:   12px;
+  --twm-font-size-base: 13px;
+  --twm-font-size-lg:   15px;
+
+  /* ── Radii ── */
+  --twm-radius-sm: 2px;
+  --twm-radius:    4px;
+  --twm-radius-lg: 8px;
+
+  /* ── Transitions ── */
+  --twm-transition:      150ms ease;
+  --twm-transition-slow: 300ms ease;
+
+  /* ── Z-index ladder ── */
+  --twm-z-base:      0;
+  --twm-z-panel:     10;
+  --twm-z-focused:   20;
+  --twm-z-float:     100;
+  --twm-z-statusbar: 200;
+  --twm-z-modal:     1000;
+  --twm-z-toast:     2000;
+}
+
+/* ── Light theme overrides ── */
+[data-theme="light"] {
+  --twm-color-bg:       #f5f5f5;
+  --twm-color-surface:  #ffffff;
+  --twm-color-surface2: #ebebeb;
+  --twm-color-border:   #d0d0d0;
+  --twm-color-text:     #1a1a1a;
+  --twm-color-text-dim: #6e6e6e;
+  --twm-color-accent:   #1a73e8;
+  --twm-color-accent-hover: #1558b0;
+  --twm-color-danger:   #c62828;
+  --twm-color-success:  #2e7d32;
+  --twm-color-warning:  #bf6a00;
+  --twm-color-hint:     #888888;
+}

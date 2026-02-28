@@ -1,0 +1,28 @@
+# .dockerignore — keeps build context fast by excluding files Docker doesn't need
+
+# Version control
+.git
+.github
+
+# Generated outputs
+dist
+node_modules
+
+# Local runtime data — injected at container startup, not baked in
+.env
+auth.db
+poll-settings.json
+
+# Test/dev artifacts
+test-results
+coverage
+e2e
+fixtures
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.log
+
+# IdP metadata (mount as a volume if SAML is used in Docker)
+GoogleIDPMetadata.xml

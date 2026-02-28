@@ -7,7 +7,7 @@ import { EnvConfigModal } from '../tiles/EnvConfigModal';
 import { renderTile } from '../tiles/renderTile';
 import { makeTile } from '../tiles/TileConfig';
 import type { TileConfig, TileType } from '../tiles/TileConfig';
-import { TILE_SSE_CHANNEL } from '../tiles/TileConfig';
+import { TILE_SSE_CHANNEL, WEBHOOK_CAPABLE } from '../tiles/TileConfig';
 import { saveTileLayout, loadTileLayout, loadLayoutFromServer, saveLayoutToServer } from '../tiles/tilePersistence';
 import { API_BASE_URL } from '../data/api';
 import { useAuth } from '../ui/AuthContext';
@@ -86,6 +86,11 @@ export function DashboardPanel(props: Props): JSX.Element {
   const [configuringTileId, setConfiguringTileId] = createSignal<string | null>(null);
   const [refreshingIds, setRefreshingIds] = createSignal<Set<string>>(new Set());
   const [envModalOpen, setEnvModalOpen] = createSignal(false);
+  const [importPending, setImportPending] = createSignal<TileConfig[] | null>(null);
+  const [importError, setImportError] = createSignal('');
+  const [clearPending, setClearPending] = createSignal(false);
+  /** Position pre-seeded from a double-click on empty canvas. Cleared after use. */
+  const [addAtPosition, setAddAtPosition] = createSignal<{ x: number; y: number } | null>(null);
 
   const configuringTile = () => {
     const id = configuringTileId();
@@ -128,6 +133,23 @@ export function DashboardPanel(props: Props): JSX.Element {
         body: JSON.stringify({ settings }),
       });
     }
+
+    // Sync webhook delivery modes — covers first load on a fresh server (no
+    // poll-settings.json) where the server doesn't yet know which channels the
+    // user configured as webhook-delivered.
+    const webhookChannels = new Set<string>();
+    for (const t of loaded) {
+      if (t.deliveryMode === 'webhook' && WEBHOOK_CAPABLE.has(t.type)) {
+        webhookChannels.add(TILE_SSE_CHANNEL[t.type] ?? t.type);
+      }
+    }
+    for (const channel of webhookChannels) {
+      void fetch(`${API_BASE_URL}/api/poll/set-delivery/${channel}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'webhook' }),
+      });
+    }
   });
 
   function handleLayoutChange(updated: TileConfig[]): void {
@@ -136,7 +158,10 @@ export function DashboardPanel(props: Props): JSX.Element {
   }
 
   function handleAddTile(tile: TileConfig): void {
-    const updated = [...tiles(), tile];
+    const pos = addAtPosition();
+    const placed = pos ? { ...tile, x: pos.x, y: pos.y } : tile;
+    setAddAtPosition(null);
+    const updated = [...tiles(), placed];
     setTiles(updated);
     persistLayout(updated);
   }
@@ -199,6 +224,61 @@ export function DashboardPanel(props: Props): JSX.Element {
     persistLayout(updated);
   }
 
+  function handleExport(): void {
+    const json = JSON.stringify(tiles(), null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dashboard-${props.panelId ?? 'default'}-${date}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  let importInputRef: HTMLInputElement | undefined;
+
+  function handleImportFile(e: Event): void {
+    const file = (e.currentTarget as HTMLInputElement).files?.[0];
+    if (!importInputRef) return;
+    importInputRef.value = ''; // reset so the same file can be re-selected
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string) as unknown;
+        if (!Array.isArray(parsed)) throw new Error('Expected a JSON array at the root.');
+        for (const item of parsed as unknown[]) {
+          if (typeof item !== 'object' || item === null) throw new Error('Each tile must be an object.');
+          const t = item as Record<string, unknown>;
+          for (const field of ['id', 'type', 'x', 'y', 'w', 'h'] as const) {
+            if (!(field in t)) throw new Error(`Tile is missing required field "${field}".`);
+          }
+        }
+        setImportError('');
+        setImportPending(parsed as TileConfig[]);
+      } catch (err: unknown) {
+        setImportError(err instanceof Error ? err.message : 'Invalid JSON file.');
+        setImportPending(null);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function confirmImport(): void {
+    const pending = importPending();
+    if (!pending) return;
+    setTiles(pending);
+    persistLayout(pending);
+    setImportPending(null);
+  }
+
+  function confirmClear(): void {
+    setTiles([]);
+    persistLayout([]);
+    setClearPending(false);
+  }
+
   return (
     <div class="dashboard-panel" data-panel-id={props.panelId} style={{ height: '100%', display: 'flex', 'flex-direction': 'column' }}>
       {/* Dashboard toolbar */}
@@ -217,6 +297,31 @@ export function DashboardPanel(props: Props): JSX.Element {
               Sign Out
             </button>
           </Show>
+          <button class="btn btn--neutral btn--sm" title="Export dashboard as JSON" onClick={handleExport}>
+            Export
+          </button>
+          <button
+            class="btn btn--neutral btn--sm"
+            title="Import dashboard from JSON file"
+            onClick={() => importInputRef?.click()}
+          >
+            Import
+          </button>
+          <button
+            class="btn btn--danger btn--sm"
+            title="Clear all tiles from this dashboard"
+            onClick={() => setClearPending(true)}
+          >
+            Clear
+          </button>
+          {/* Hidden file picker for import */}
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={handleImportFile}
+          />
           <button
             class="btn btn--neutral btn--sm"
             aria-label="Edit environment variables"
@@ -246,6 +351,7 @@ export function DashboardPanel(props: Props): JSX.Element {
           onRefreshTile={handleRefreshTile}
           isRefreshingTile={(id) => refreshingIds().has(id)}
           onTileCopy={handleCopyTile}
+          onAddAtPosition={(x, y) => { setAddAtPosition({ x, y }); setModalOpen(true); }}
         />
       </div>
 
@@ -253,7 +359,7 @@ export function DashboardPanel(props: Props): JSX.Element {
       <AddTileModal
         isOpen={modalOpen()}
         onAdd={handleAddTile}
-        onClose={() => setModalOpen(false)}
+        onClose={() => { setModalOpen(false); setAddAtPosition(null); }}
       />
 
       {/* Tile config modal */}
@@ -270,6 +376,34 @@ export function DashboardPanel(props: Props): JSX.Element {
       {/* Env config modal */}
       <Show when={envModalOpen()}>
         <EnvConfigModal onClose={() => setEnvModalOpen(false)} />
+      </Show>
+
+      {/* Clear confirm banner */}
+      <Show when={clearPending()}>
+        <div class="dashboard-import-confirm">
+          <span>This will remove all {tiles().length} tile{tiles().length !== 1 ? 's' : ''} from the dashboard. Continue?</span>
+          <div class="dashboard-import-confirm__actions">
+            <button class="btn btn--danger btn--sm" onClick={confirmClear}>Clear dashboard</button>
+            <button class="btn btn--neutral btn--sm" onClick={() => setClearPending(false)}>Cancel</button>
+          </div>
+        </div>
+      </Show>
+
+      {/* Import confirm banner */}
+      <Show when={importPending() !== null}>
+        <div class="dashboard-import-confirm">
+          <span>This will replace your current dashboard ({importPending()?.length ?? 0} tiles). Continue?</span>
+          <div class="dashboard-import-confirm__actions">
+            <button class="btn btn--danger btn--sm" onClick={confirmImport}>Replace dashboard</button>
+            <button class="btn btn--neutral btn--sm" onClick={() => setImportPending(null)}>Cancel</button>
+          </div>
+        </div>
+      </Show>
+      <Show when={importError().length > 0}>
+        <div class="dashboard-import-error">
+          Import failed: {importError()}
+          <button class="btn btn--neutral btn--sm" onClick={() => setImportError('')}>Dismiss</button>
+        </div>
       </Show>
     </div>
   );

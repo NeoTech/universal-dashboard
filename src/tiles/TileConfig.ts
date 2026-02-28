@@ -209,6 +209,8 @@ export interface WsTileConfig {
   /** Dot-path field to extract numeric values for chart visualisation, e.g. "p" */
   chartField?: string;
   chartType?: 'line' | 'bar' | 'candle';
+  /** Maximum number of data points kept in the chart buffer (default 500). Persisted to sessionStorage. */
+  chartBufferMaxPoints?: number;
 }
 
 export interface TileConfig {
@@ -266,6 +268,14 @@ export interface TileConfig {
    * when empty.
    */
   keywords?: string;
+  /**
+   * Delivery mode for supported provider tiles.
+   * - 'poll'    — server polls the provider API on a schedule (default).
+   * - 'webhook' — server receives push events from the provider webhook;
+   *               polling is suspended for this channel.
+   * Only applicable to tile types listed in WEBHOOK_CAPABLE.
+   */
+  deliveryMode?: 'poll' | 'webhook';
 }
 
 export const TILE_DEFAULTS: Record<TileType, Partial<TileConfig>> = {
@@ -577,10 +587,42 @@ export const TILE_SSE_CHANNEL: Partial<Record<TileType, string>> = {
   'cloudflare-pages':        'cf-pages',
   'cloudflare-functions':    'cf-workers',
   'stripe-orders':           'stripe-payments',
+  'paypal-transactions':     'paypal-data',
   'coingecko-prices':        'coingecko-markets',
   // Both UI-facing Reddit tile types share the same 'reddit-posts' SSE feed.
   'reddit-hot-posts':        'reddit-posts',
   'reddit-keyword-monitor':  'reddit-posts',
+};
+
+/**
+ * Tile types that support webhook-based push delivery as an alternative to
+ * the default poll mode. When a tile's deliveryMode is 'webhook', polling is
+ * suspended and the server instead receives events via POST /api/webhooks/<provider>.
+ */
+export const WEBHOOK_CAPABLE = new Set<TileType>([
+  'stripe-payments',
+  'stripe-orders',
+  'stripe-subscriptions',
+  'stripe-webhooks',
+  'github-actions',
+  'paypal-transactions',
+  'vercel-deployments',
+  'netlify-deployments',
+]);
+
+/**
+ * Maps webhook-capable tile types to their provider identifier used in the
+ * POST /api/webhooks/<provider> endpoint URL.
+ */
+export const WEBHOOK_PROVIDER: Partial<Record<TileType, string>> = {
+  'stripe-payments':     'stripe',
+  'stripe-orders':       'stripe',
+  'stripe-subscriptions':'stripe',
+  'stripe-webhooks':     'stripe',
+  'github-actions':      'github',
+  'paypal-transactions': 'paypal',
+  'vercel-deployments':  'vercel',
+  'netlify-deployments': 'netlify',
 };
 
 /** Create a new TileConfig with sensible defaults */

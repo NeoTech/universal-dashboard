@@ -54,6 +54,9 @@ interface Props {
   isRefreshingTile?: (id: string) => boolean;
   /** Called when the user ALT+drags a tile to a new position to copy it. */
   onTileCopy?: (sourceId: string, x: number, y: number) => void;
+  /** Called when the user double-clicks empty canvas space. Coordinates are
+   *  canvas-relative and snapped to the layout grid. */
+  onAddAtPosition?: (x: number, y: number) => void;
 }
 
 // ── Module-level drag/resize state (same pattern as PanelTree) ───────────────
@@ -228,6 +231,16 @@ export function TileGrid(props: Props): JSX.Element {
       style={{ position: 'absolute', inset: '0', overflow: 'auto' }}
       on:pointermove={(e: PointerEvent) => { onDragPointerMove(e); onResizePointerMove(e); }}
       on:pointerup={(e: PointerEvent) => { onDragPointerUp(e); onResizePointerUp(e); }}
+      onDblClick={(e: MouseEvent) => {
+        // Only fire when the double-click lands directly on the canvas background,
+        // not on or inside a tile element.
+        if ((e.target as HTMLElement).closest('.tile')) return;
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const scrollEl = e.currentTarget as HTMLElement;
+        const rawX = e.clientX - rect.left + scrollEl.scrollLeft;
+        const rawY = e.clientY - rect.top  + scrollEl.scrollTop;
+        props.onAddAtPosition?.(snap(rawX), snap(rawY));
+      }}
     >
       <For each={tiles}>
         {(tile) => (
@@ -254,7 +267,7 @@ export function TileGrid(props: Props): JSX.Element {
               on:pointerdown={(e: PointerEvent) => onDragPointerDown(e, tile)}
             >
               <span class="tile__title">{tile.title ?? tile.type}</span>
-              <Show when={(tile.refreshInterval ?? 1) > 0}>
+              <Show when={(tile.refreshInterval ?? 1) > 0 && tile.deliveryMode !== 'webhook'}>
                 <TileRefreshTimer
                   intervalMs={tile.refreshInterval ?? TILE_POLL_MS[tile.type] ?? 60_000}
                   onRefresh={() => handleTileRefresh(tile.id)}

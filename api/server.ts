@@ -2,7 +2,8 @@
  * TWM API Server — Stripe proxy + GitHub Actions + Cloudflare + PayPal
  * Run: bun run api
  * Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, GITHUB_TOKEN, CF_API_TOKEN, CF_ACCOUNT_ID,
- *      PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_ENV, API_PORT (default 3001)
+ *      PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_ENV, API_PORT (default 3001), API_HOST (default 0.0.0.0)
+ *      Provider URL overrides: STRIPE_API_URL, GITHUB_API_URL, CLOUDFLARE_API_URL, PAYPAL_API_URL, BACKEND_BASE_URL
  */
 
 import { createServer as httpCreateServer } from 'node:http';
@@ -13,6 +14,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHmac, randomBytes, pbkdf2Sync } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import Stripe from 'stripe';
+import { buildAuthnRequest, deflateEncode, buildSpMetadata, verifySamlResponse, parseIdpMetadata } from './saml.ts';
 
 // ── Order workflow status store (SQLite via bun:sqlite) ───────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -124,6 +126,50 @@ const JWT_SECRET: string = process.env['JWT_SECRET'] ?? (() => {
 /** Whether login is required. Set AUTH_ENABLED=true in .env to enable. */
 const AUTH_ENABLED: boolean = process.env['AUTH_ENABLED'] === 'true';
 
+// ── SAML SSO config ────────────────────────────────────────────────────────────
+/** Authentication provider: 'local' (default) or 'saml' for SAML 2.0 SSO. */
+const AUTH_PROVIDER: 'local' | 'saml' =
+  (process.env['AUTH_PROVIDER'] === 'saml') ? 'saml' : 'local';
+
+const SAML_ISSUER       = process.env['SAML_ISSUER']       ?? 'tiling-window-manager';
+const SAML_CALLBACK_URL = process.env['SAML_CALLBACK_URL'] ?? 'http://localhost:3001/api/auth/saml/callback';
+// APP_URL: where the SPA frontend is served. Used to redirect back to the UI after SAML login.
+// Defaults to the origin of SAML_CALLBACK_URL (correct when both are behind the same proxy).
+// Set explicitly (e.g. APP_URL=http://localhost:8080) when the API and frontend run on different origins.
+const APP_URL = process.env['APP_URL'] ?? (() => { try { const u = new URL(SAML_CALLBACK_URL); return `${u.protocol}//${u.host}`; } catch { return 'http://localhost:8080'; } })();
+
+// SAML_IDP_METADATA_PATH takes priority over individual SAML_ENTRY_POINT/SAML_CERT vars.
+// Point it at the XML file exported from your IdP (Google Workspace, Okta, Azure AD, etc.)
+let SAML_ENTRY_POINT = process.env['SAML_ENTRY_POINT'] ?? '';
+/** IdP certificate PEM (base64 body, with or without -----BEGIN/END----- headers). */
+let SAML_CERT        = process.env['SAML_CERT']        ?? '';
+
+const SAML_IDP_METADATA_PATH = process.env['SAML_IDP_METADATA_PATH'] ?? '';
+if (SAML_IDP_METADATA_PATH) {
+  try {
+    const metaXml = readFileSync(
+      SAML_IDP_METADATA_PATH.startsWith('/') || SAML_IDP_METADATA_PATH.match(/^[A-Za-z]:\\/)
+        ? SAML_IDP_METADATA_PATH
+        : join(__dirname, '..', SAML_IDP_METADATA_PATH),
+      'utf8',
+    );
+    const meta = parseIdpMetadata(metaXml);
+    SAML_ENTRY_POINT = meta.entryPoint;
+    SAML_CERT        = meta.cert;
+    console.log(`  [saml] loaded IdP metadata from ${SAML_IDP_METADATA_PATH}`);
+    console.log(`  [saml] entry point: ${SAML_ENTRY_POINT}`);
+  } catch (e) {
+    console.error(`  [saml] ERROR reading SAML_IDP_METADATA_PATH (${SAML_IDP_METADATA_PATH}):`, e instanceof Error ? e.message : e);
+  }
+}
+
+if (AUTH_PROVIDER === 'saml' && !SAML_ENTRY_POINT) {
+  console.warn('  [saml] WARNING: AUTH_PROVIDER=saml but SAML_ENTRY_POINT is not set — SSO login will fail.');
+}
+if (AUTH_PROVIDER === 'saml' && !SAML_CERT) {
+  console.warn('  [saml] WARNING: AUTH_PROVIDER=saml but SAML_CERT is not set — signature verification will fail.');
+}
+
 interface JwtPayload { sub: number; username: string; iat: number; exp: number; }
 const JWT_EXPIRY_S = 30 * 86400; // 30 days
 
@@ -192,11 +238,25 @@ function writeStatus(id: string, entry: OrderStatusEntry): void {
   stmtUpsert.run(id, entry.status, entry.updatedAt, entry.note ?? null);
 }
 
+// ── Provider base-URL overrides (for local mocks / enterprise endpoints) ──────
+const STRIPE_API_URL     = process.env['STRIPE_API_URL']     ?? 'https://api.stripe.com';
+const GITHUB_API_URL     = process.env['GITHUB_API_URL']     ?? 'https://api.github.com';
+const CLOUDFLARE_API_URL = process.env['CLOUDFLARE_API_URL'] ?? 'https://api.cloudflare.com/client/v4';
+const PAYPAL_API_URL     = process.env['PAYPAL_API_URL']     ?? '';   // empty = use PAYPAL_ENV logic
+const BACKEND_BASE_URL   = process.env['BACKEND_BASE_URL']   ?? '';   // prepended when proxy url is relative
+
 // ── Stripe client (lazy) ──────────────────────────────────────────────────────
 function getStripe(): Stripe | null {
   const key = process.env['STRIPE_SECRET_KEY'];
   if (!key || key.startsWith('sk_test_your')) return null;
-  return new Stripe(key, { apiVersion: '2025-01-27.acacia' });
+  const cfg: Stripe.StripeConfig = { apiVersion: '2025-01-27.acacia' };
+  if (STRIPE_API_URL !== 'https://api.stripe.com') {
+    const u = new URL(STRIPE_API_URL);
+    cfg.host     = u.hostname;
+    cfg.protocol = (u.protocol === 'https:' ? 'https' : 'http') as 'https' | 'http';
+    if (u.port) cfg.port = parseInt(u.port, 10);
+  }
+  return new Stripe(key, cfg);
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -560,6 +620,7 @@ const pollerRunFns = new Map<string, () => Promise<void>>();
 interface PollSettings {
   paused: string[];
   intervals: Record<string, number>; // event → ms override
+  webhookChannels?: string[];        // channels delivered via provider webhooks
 }
 
 function loadPollSettings(): PollSettings {
@@ -568,17 +629,20 @@ function loadPollSettings(): PollSettings {
       const s = JSON.parse(readFileSync(POLL_SETTINGS_PATH, 'utf8')) as PollSettings;
       const pausedList = s.paused ?? [];
       const intervalKeys = Object.keys(s.intervals ?? {});
-      if (pausedList.length || intervalKeys.length) {
+      const webhookList = s.webhookChannels ?? [];
+      if (pausedList.length || intervalKeys.length || webhookList.length) {
         console.log('  [poll] restored settings from poll-settings.json');
         for (const ch of pausedList)
           console.log(`  [poll]   paused:   ${ch}`);
         for (const [ch, ms] of Object.entries(s.intervals ?? {}))
           console.log(`  [poll]   interval: ${ch.padEnd(32)}  ${fmtMs(ms)}`);
+        for (const ch of webhookList)
+          console.log(`  [poll]   webhook:  ${ch}`);
       }
       return s;
     }
   } catch { /* corrupt file — ignore */ }
-  return { paused: [], intervals: {} };
+  return { paused: [], intervals: {}, webhookChannels: [] };
 }
 
 function fmtMs(ms: number): string {
@@ -591,6 +655,7 @@ function savePollSettings(): void {
   const settings: PollSettings = {
     paused: [...pausedPollers],
     intervals: Object.fromEntries(pollerCustomIntervals),
+    webhookChannels: [...webhookMode],
   };
   try { writeFileSync(POLL_SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8'); } catch { /* ignore */ }
 }
@@ -608,6 +673,16 @@ const pausedPollers = new Set<string>(_savedSettings.paused);
  * Persisted to poll-settings.json.
  */
 const pollerCustomIntervals = new Map<string, number>(Object.entries(_savedSettings.intervals));
+
+/**
+ * Channels delivered via provider webhooks instead of periodic polling.
+ * These channels are also added to pausedPollers so the regular polling loop
+ * skips them; they are refreshed on demand when a webhook arrives.
+ * Persisted to poll-settings.json under webhookChannels.
+ */
+const webhookMode = new Set<string>(_savedSettings.webhookChannels ?? []);
+// Ensure webhook channels are also reflected in pausedPollers on startup.
+for (const ch of webhookMode) pausedPollers.add(ch);
 
 function broadcastSse(event: string, data: unknown): void {
   resourceCache.set(event, data);
@@ -711,7 +786,8 @@ function cfHeaders(): Record<string, string> {
 
 async function cfFetch(path: string): Promise<unknown> {
   const accountId = process.env['CF_ACCOUNT_ID'] ?? '';
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, { headers: cfHeaders() });
+  const base = CLOUDFLARE_API_URL.replace(/\/$/, '');
+  const r = await fetch(`${base}/accounts/${accountId}${path}`, { headers: cfHeaders() });
   const data = await r.json() as { success: boolean; result: unknown; errors: { message: string }[] };
   if (!data.success) throw new Error(data.errors?.[0]?.message ?? 'Cloudflare API error');
   return data.result;
@@ -754,7 +830,7 @@ async function getPayPalToken(): Promise<string | null> {
   if (!clientId || !clientSecret) return null;
   if (_ppToken && Date.now() < _ppToken.expiresAt) return _ppToken.access_token;
   const env = process.env['PAYPAL_ENV'] ?? 'sandbox';
-  const base = env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+  const base = PAYPAL_API_URL || (env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com');
   const r = await fetch(`${base}/v1/oauth2/token`, {
     method: 'POST',
     headers: {
@@ -771,7 +847,7 @@ async function getPayPalToken(): Promise<string | null> {
 
 async function paypalFetch(path: string, token: string): Promise<unknown> {
   const env = process.env['PAYPAL_ENV'] ?? 'sandbox';
-  const base = env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+  const base = PAYPAL_API_URL || (env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com');
   const r = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
   if (!r.ok) { const err = await r.text(); throw new Error(err); }
   return r.json();
@@ -906,7 +982,7 @@ async function batchConcurrent<T>(tasks: Array<() => Promise<T>>, concurrency: n
 
 async function fetchGithubRunsForUser(token: string, user: string): Promise<GHApiRun[]> {
   const ghHeaders = { Authorization: `Bearer ${token}`, 'User-Agent': 'TWM-API/1.0', 'X-GitHub-Api-Version': '2022-11-28' };
-  const reposRes = await fetch(`https://api.github.com/users/${user}/repos?type=owner&per_page=100`, { headers: ghHeaders });
+  const reposRes = await fetch(`${GITHUB_API_URL}/users/${user}/repos?type=owner&per_page=100`, { headers: ghHeaders });
   if (!reposRes.ok) {
     if (reposRes.status === 403 || reposRes.status === 429) {
       const reset = Number(reposRes.headers.get('x-ratelimit-reset') ?? '0');
@@ -930,7 +1006,7 @@ async function fetchGithubRunsForUser(token: string, user: string): Promise<GHAp
   }
 
   const tasks = capped.map((repo) => async () => {
-    const r = await fetch(`https://api.github.com/repos/${repo.full_name}/actions/runs?per_page=10`, { headers: ghHeaders });
+    const r = await fetch(`${GITHUB_API_URL}/repos/${repo.full_name}/actions/runs?per_page=10`, { headers: ghHeaders });
     if (!r.ok) {
       if (r.status === 403 || r.status === 429) {
         const rs = Number(r.headers.get('x-ratelimit-reset') ?? '0');
@@ -967,7 +1043,7 @@ async function dataGithubRuns(): Promise<unknown> {
   try {
     let runs: unknown;
     if (org) {
-      const apiUrl = `https://api.github.com/orgs/${org}/actions/runs?per_page=50`;
+      const apiUrl = `${GITHUB_API_URL}/orgs/${org}/actions/runs?per_page=50`;
       const ghRes = await fetch(apiUrl, { headers: ghHeaders });
       if (!ghRes.ok) {
         if (ghRes.status === 403 || ghRes.status === 429) {
@@ -3027,10 +3103,35 @@ const CHANNEL_ENV_MAP: Record<string, string[]> = {
 function startPollers(): void {
   const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23);
 
+  // Auto-detect webhook mode from env secrets — if a provider's webhook secret
+  // is configured, assume the webhook endpoint is registered with that provider
+  // and suspend periodic polling for all of its channels.
+  const webhookSecretProviders: Array<{ secret: string; channels: string[] }> = [
+    { secret: 'STRIPE_WEBHOOK_SECRET',  channels: ['stripe-payments', 'stripe-subscriptions', 'stripe-products', 'stripe-customers', 'stripe-invoices', 'stripe-refunds', 'stripe-revenue', 'stripe-webhooks'] },
+    { secret: 'GITHUB_WEBHOOK_SECRET',  channels: ['github-runs'] },
+    { secret: 'PAYPAL_WEBHOOK_SECRET',  channels: ['paypal-data'] },
+    { secret: 'VERCEL_WEBHOOK_SECRET',  channels: ['vercel-deployments'] },
+    { secret: 'NETLIFY_WEBHOOK_SECRET', channels: ['netlify-deployments'] },
+  ];
+  for (const { secret, channels } of webhookSecretProviders) {
+    if (process.env[secret]) {
+      for (const ch of channels) {
+        if (!webhookMode.has(ch)) {
+          webhookMode.add(ch);
+          pausedPollers.add(ch);
+          console.log(`  [poll] webhook-auto ${ch.padEnd(30)}  (${secret} is set)`);
+        }
+      }
+    }
+  }
+  // Persist any newly auto-detected webhook channels.
+  savePollSettings();
+
   function poll(event: string, ms: number, fn: () => Promise<unknown>): void {
     const effectiveMs = pollerCustomIntervals.get(event) ?? ms;
+    const isWebhook = webhookMode.has(event);
 
-    console.log(`  [poll] registered  ${event.padEnd(32)}  every ${fmtMs(effectiveMs)}${pausedPollers.has(event) ? '  (PAUSED)' : ''}`);
+    console.log(`  [poll] registered  ${event.padEnd(32)}  ${isWebhook ? '(WEBHOOK — polling suspended)' : `every ${fmtMs(effectiveMs)}${pausedPollers.has(event) ? '  (PAUSED)' : ''}` }`);
 
     const run = () => {
       const t0 = Date.now();
@@ -3050,8 +3151,13 @@ function startPollers(): void {
         });
     };
 
-    if (!pausedPollers.has(event)) void run(); // skip initial fetch if paused at startup
-    pollerIntervals.set(event, setInterval(() => { if (!pausedPollers.has(event)) void run(); }, effectiveMs));
+    // Always do one initial fetch to populate the SSE cache — even in webhook
+    // mode tiles need data immediately on load without waiting for a webhook.
+    void run();
+    // Skip the interval entirely for webhook-driven channels.
+    if (!isWebhook) {
+      pollerIntervals.set(event, setInterval(() => { if (!pausedPollers.has(event)) void run(); }, effectiveMs));
+    }
     pollerRunFns.set(event, () => run() as Promise<void>);
     refreshRegistry.set(event, () => run() as Promise<void>);
   }
@@ -3346,11 +3452,16 @@ async function handleApiProxy(req: IncomingMessage, res: ServerResponse): Promis
     json(res, 400, { ok: false, error: '"url" is required' }); return;
   }
 
+  // Resolve relative URLs against BACKEND_BASE_URL if configured.
+  const resolvedUrl = !url.startsWith('http') && BACKEND_BASE_URL
+    ? `${BACKEND_BASE_URL.replace(/\/$/, '')}/${url.replace(/^\//, '')}`
+    : url;
+
   const upper = method.toUpperCase();
   const hasBody = !['GET', 'HEAD', 'DELETE'].includes(upper) && reqBody != null;
 
   try {
-    const r = await fetch(url, {
+    const r = await fetch(resolvedUrl, {
       method: upper,
       headers: hasBody
         ? { 'Content-Type': 'application/json', ...headers }
@@ -3487,7 +3598,68 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // ── Auth routes (always public) ────────────────────────────────────────────
   if (pathname === '/api/auth/config' && method === 'GET') {
-    json(res, 200, { enabled: AUTH_ENABLED });
+    const samlLoginUrl = AUTH_PROVIDER === 'saml' && SAML_ENTRY_POINT ? '/api/auth/saml/login' : null;
+    json(res, 200, { enabled: AUTH_ENABLED, provider: AUTH_PROVIDER, samlLoginUrl });
+    return;
+  }
+
+  // ── SAML SSO routes ──────────────────────────────────────────────────────────
+  if (pathname === '/api/auth/saml/login' && method === 'GET') {
+    if (AUTH_PROVIDER !== 'saml') { json(res, 404, { error: 'SAML not enabled (set AUTH_PROVIDER=saml)' }); return; }
+    if (!SAML_ENTRY_POINT) { json(res, 503, { error: 'SAML_ENTRY_POINT not configured' }); return; }
+    const id       = `_twm${randomBytes(16).toString('hex')}`;
+    const instant  = new Date().toISOString();
+    const xml      = buildAuthnRequest({ id, issueInstant: instant, entryPoint: SAML_ENTRY_POINT, issuer: SAML_ISSUER, callbackUrl: SAML_CALLBACK_URL });
+    const encoded  = encodeURIComponent(deflateEncode(xml));
+    const relay    = encodeURIComponent(req.url ? new URL(req.url, 'http://localhost').searchParams.get('RelayState') ?? '/' : '/');
+    const sep      = SAML_ENTRY_POINT.includes('?') ? '&' : '?';
+    console.log(`  [saml] redirecting to IdP id=${id}`);
+    res.writeHead(302, { Location: `${SAML_ENTRY_POINT}${sep}SAMLRequest=${encoded}&RelayState=${relay}` });
+    res.end();
+    return;
+  }
+
+  if (pathname === '/api/auth/saml/callback' && method === 'POST') {
+    if (AUTH_PROVIDER !== 'saml') { json(res, 404, { error: 'SAML not enabled' }); return; }
+    try {
+      const body = await readBody(req);
+      // Body is application/x-www-form-urlencoded
+      const params   = new URLSearchParams(body);
+      const samlResp = params.get('SAMLResponse');
+      if (!samlResp) { json(res, 400, { error: 'Missing SAMLResponse' }); return; }
+      if (!SAML_CERT) { json(res, 503, { error: 'SAML_CERT not configured' }); return; }
+
+      const nameId = verifySamlResponse(samlResp, SAML_CERT);
+
+      // Upsert user in auth.db (SAML users have an empty password_hash)
+      let user = stmtFindUser.get(nameId);
+      if (!user) {
+        const rows = stmtInsertUser.all(nameId, 'saml:' + randomBytes(16).toString('hex'));
+        user = { id: rows[0]!.id, username: nameId, password_hash: '' };
+        console.log(`  [saml] new user     nameId=${nameId} id=${user.id}`);
+      } else {
+        console.log(`  [saml] login        nameId=${nameId} id=${user.id}`);
+      }
+
+      const token     = signJwt(user.id, user.username);
+      const relayState = params.get('RelayState') ?? '/';
+      // Build redirect: always go to the frontend (APP_URL) so the SPA can consume the token.
+      // RelayState is a relative path (e.g. '/'); resolve it against APP_URL.
+      const destPath   = relayState.startsWith('/') ? relayState : '/';
+      const dest       = `${APP_URL}${destPath}`;
+      res.writeHead(302, { Location: `${dest.includes('?') ? dest + '&' : dest + '?'}token=${encodeURIComponent(token)}` });
+      res.end();
+    } catch (e) {
+      console.error('  [saml] callback error:', e);
+      json(res, 401, { error: e instanceof Error ? e.message : 'SAML authentication failed' });
+    }
+    return;
+  }
+
+  if (pathname === '/api/auth/saml/metadata' && method === 'GET') {
+    const xml = buildSpMetadata({ entityId: SAML_ISSUER, callbackUrl: SAML_CALLBACK_URL });
+    res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
+    res.end(xml);
     return;
   }
   if (pathname === '/api/auth/register' && method === 'POST') {
@@ -3530,7 +3702,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   // ── Auth middleware — guards all routes below when AUTH_ENABLED ────────────
-  if (AUTH_ENABLED && !extractToken(req)) {
+  // Webhook receive routes are intentionally public — providers cannot supply
+  // a user JWT, so signature verification is the sole authentication mechanism.
+  const isWebhookRoute = pathname.startsWith('/api/webhooks/') && method === 'POST';
+  if (AUTH_ENABLED && !isWebhookRoute && !extractToken(req)) {
     json(res, 401, { error: 'Unauthorized' });
     return;
   }
@@ -3589,6 +3764,26 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // Do NOT spawn a child — that causes port conflicts when the supervisor
     // also restarts at the same time.
     setTimeout(() => process.exit(0), 200);
+    return;
+  }
+
+  if (pathname === '/api/server/info' && method === 'GET') {
+    const port = parseInt(process.env['API_PORT'] ?? '3001', 10);
+    const host = process.env['API_HOST'] ?? '0.0.0.0';
+    json(res, 200, {
+      host,
+      port,
+      boundAddress: `${host === '0.0.0.0' ? 'localhost' : host}:${port}`,
+      stripeApiUrl:     STRIPE_API_URL,
+      githubApiUrl:     GITHUB_API_URL,
+      cloudflareApiUrl: CLOUDFLARE_API_URL,
+      paypalApiUrl:     PAYPAL_API_URL || (
+        (process.env['PAYPAL_ENV'] ?? 'sandbox') === 'live'
+          ? 'https://api-m.paypal.com'
+          : 'https://api-m.sandbox.paypal.com'
+      ),
+      backendBaseUrl: BACKEND_BASE_URL,
+    });
     return;
   }
 
@@ -3653,6 +3848,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         if (run) pollerIntervals.set(channel, setInterval(() => { if (!pausedPollers.has(channel)) void run(); }, ms));
       }
     }
+    // Webhook-mode channels must always stay paused regardless of sync payload.
+    for (const ch of webhookMode) pausedPollers.add(ch);
     savePollSettings();
     json(res, 200, { ok: true, synced: settings.length });
     return;
@@ -3669,6 +3866,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
   if (pathname.startsWith('/api/poll/resume/') && method === 'POST') {
     const channel = pathname.slice('/api/poll/resume/'.length);
+    if (webhookMode.has(channel)) {
+      // Webhook channels stay paused — they are refreshed by incoming webhooks.
+      json(res, 200, { ok: true, channel, paused: true, webhookMode: true });
+      return;
+    }
     const customMs = pollerCustomIntervals.get(channel);
     console.log(`  [poll] RESUME      ${channel}  (dashboard request)${customMs ? `  interval=${fmtMs(customMs)}` : ''}`);
     pausedPollers.delete(channel);
@@ -3695,6 +3897,41 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       pollerIntervals.set(channel, setInterval(() => { if (!pausedPollers.has(channel)) void run(); }, newMs));
     }
     json(res, 200, { ok: true, channel, ms: newMs });
+    return;
+  }
+
+  // POST /api/poll/set-delivery/:channel  — switch a channel between 'poll'
+  // and 'webhook' delivery modes.  In webhook mode the regular poller is
+  // suspended; the server waits for a push from POST /api/webhooks/<provider>.
+  if (pathname.startsWith('/api/poll/set-delivery/') && method === 'POST') {
+    const channel = pathname.slice('/api/poll/set-delivery/'.length);
+    const body = await readBody(req);
+    const { mode } = JSON.parse(body) as { mode: 'poll' | 'webhook' };
+    if (mode !== 'poll' && mode !== 'webhook') { json(res, 400, { error: "mode must be 'poll' or 'webhook'" }); return; }
+    if (mode === 'webhook') {
+      webhookMode.add(channel);
+      pausedPollers.add(channel);
+      console.log(`  [poll] WEBHOOK     ${channel}  (polling suspended — awaiting push)`);
+    } else {
+      webhookMode.delete(channel);
+      pausedPollers.delete(channel);
+      console.log(`  [poll] POLL        ${channel}  (polling resumed)`);
+      const fn = refreshRegistry.get(channel);
+      if (fn) void fn(); // immediate fetch on switch back to poll
+    }
+    savePollSettings();
+    json(res, 200, { ok: true, channel, mode });
+    return;
+  }
+
+  // GET /api/poll/status  — return current pause and webhook state for all
+  // known channels so the dashboard can reflect server-side state on load.
+  if (pathname === '/api/poll/status' && method === 'GET') {
+    json(res, 200, {
+      paused: [...pausedPollers],
+      webhookChannels: [...webhookMode],
+      intervals: Object.fromEntries(pollerCustomIntervals),
+    });
     return;
   }
 
@@ -3743,6 +3980,138 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (pathname.startsWith('/api/netlify/')) {
     if (pathname === '/api/netlify/deployments' && method === 'GET') { await route(res, dataNetlifyDeployments); return; }
     json(res, 404, { error: `Unknown Netlify route: ${pathname}` }); return;
+  }
+
+  // ── Webhook receive (provider → dashboard) ─────────────────────────────────
+  // Each route verifies the provider signature then triggers a refresh of the
+  // relevant SSE channel so connected tiles get an immediate data update.
+  if (pathname.startsWith('/api/webhooks/') && method === 'POST') {
+    const body = await readBody(req);
+
+    // Helper: trigger an immediate refresh for a channel if a poller is registered.
+    const triggerRefresh = (channel: string) => {
+      const fn = refreshRegistry.get(channel);
+      if (fn) {
+        console.log(`  [webhook] trigger refresh  ${channel}`);
+        void fn();
+      } else {
+        console.log(`  [webhook] no poller for    ${channel}  (channel refreshed inline)`);
+      }
+    };
+
+    // POST /api/webhooks/stripe
+    if (pathname === '/api/webhooks/stripe') {
+      const secret = process.env['STRIPE_WEBHOOK_SECRET'];
+      const sig    = req.headers['stripe-signature'] as string | undefined;
+      let eventType = 'unknown';
+      try {
+        const stripe = getStripe();
+        if (stripe && secret && sig) {
+          const evt = stripe.webhooks.constructEvent(body, sig, secret);
+          eventType = evt.type;
+        } else if (secret && sig) {
+          // Manual HMAC-SHA256 verification if Stripe SDK unavailable
+          const { createHmac } = await import('crypto');
+          const ts = sig.split(',').find(p => p.startsWith('t='))?.slice(2) ?? '';
+          const v1 = sig.split(',').find(p => p.startsWith('v1='))?.slice(3) ?? '';
+          const expected = createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex');
+          if (expected !== v1) { json(res, 400, { error: 'Invalid Stripe signature' }); return; }
+          eventType = (JSON.parse(body) as { type?: string }).type ?? 'unknown';
+        } else {
+          eventType = (JSON.parse(body) as { type?: string }).type ?? 'unknown';
+        }
+      } catch {
+        json(res, 400, { error: 'Invalid Stripe webhook payload' });
+        return;
+      }
+      console.log(`  [webhook] stripe  event=${eventType}`);
+      // Route to appropriate SSE channel(s) based on event prefix.
+      if (eventType.startsWith('customer.subscription')) {
+        triggerRefresh('stripe-subscriptions');
+      } else if (
+        eventType.startsWith('payment_intent') ||
+        eventType.startsWith('charge') ||
+        eventType.startsWith('checkout.session')
+      ) {
+        triggerRefresh('stripe-payments');
+      } else {
+        // Fallback: refresh all commonly polled stripe channels.
+        triggerRefresh('stripe-payments');
+        triggerRefresh('stripe-subscriptions');
+      }
+      triggerRefresh('stripe-webhooks');
+      json(res, 200, { received: true });
+      return;
+    }
+
+    // POST /api/webhooks/github
+    if (pathname === '/api/webhooks/github') {
+      const secret = process.env['GITHUB_WEBHOOK_SECRET'];
+      const sig    = req.headers['x-hub-signature-256'] as string | undefined;
+      if (secret && sig) {
+        const { createHmac } = await import('crypto');
+        const expected = 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+        if (expected !== sig) { json(res, 400, { error: 'Invalid GitHub signature' }); return; }
+      }
+      const event = req.headers['x-github-event'] as string | undefined;
+      console.log(`  [webhook] github  event=${event ?? 'unknown'}`);
+      triggerRefresh('github-runs');
+      json(res, 200, { received: true });
+      return;
+    }
+
+    // POST /api/webhooks/paypal
+    if (pathname === '/api/webhooks/paypal') {
+      const secret = process.env['PAYPAL_WEBHOOK_SECRET'];
+      const sig    = req.headers['paypal-transmission-sig'] as string | undefined;
+      if (secret && sig) {
+        // Simplified HMAC-SHA256 verification using shared secret.
+        // For full certificate-based verification use the PayPal SDK.
+        const { createHmac } = await import('crypto');
+        const expected = createHmac('sha256', secret).update(body).digest('base64');
+        if (expected !== sig) { json(res, 400, { error: 'Invalid PayPal signature' }); return; }
+      }
+      const eventType = (JSON.parse(body) as { event_type?: string }).event_type ?? 'unknown';
+      console.log(`  [webhook] paypal  event=${eventType}`);
+      triggerRefresh('paypal-data');
+      json(res, 200, { received: true });
+      return;
+    }
+
+    // POST /api/webhooks/vercel
+    if (pathname === '/api/webhooks/vercel') {
+      const secret = process.env['VERCEL_WEBHOOK_SECRET'];
+      const sig    = req.headers['x-vercel-signature'] as string | undefined;
+      if (secret && sig) {
+        const { createHmac } = await import('crypto');
+        const expected = createHmac('sha1', secret).update(body).digest('hex');
+        if (expected !== sig) { json(res, 400, { error: 'Invalid Vercel signature' }); return; }
+      }
+      const eventType = (JSON.parse(body) as { type?: string }).type ?? 'unknown';
+      console.log(`  [webhook] vercel  event=${eventType}`);
+      triggerRefresh('vercel-deployments');
+      json(res, 200, { received: true });
+      return;
+    }
+
+    // POST /api/webhooks/netlify
+    if (pathname === '/api/webhooks/netlify') {
+      const secret = process.env['NETLIFY_WEBHOOK_SECRET'];
+      const sig    = req.headers['x-webhook-signature'] as string | undefined;
+      if (secret && sig) {
+        const { createHmac } = await import('crypto');
+        const expected = createHmac('sha256', secret).update(body).digest('hex');
+        if (expected !== sig) { json(res, 400, { error: 'Invalid Netlify signature' }); return; }
+      }
+      const eventType = (JSON.parse(body) as { event?: string }).event ?? 'unknown';
+      console.log(`  [webhook] netlify event=${eventType}`);
+      triggerRefresh('netlify-deployments');
+      json(res, 200, { received: true });
+      return;
+    }
+
+    json(res, 404, { error: `Unknown webhook route: ${pathname}` });
+    return;
   }
 
   // ── CircleCI ───────────────────────────────────────────────────────────────
@@ -4080,13 +4449,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 if ((import.meta as { main?: boolean }).main) {
-  const PORT = parseInt(process.env['API_PORT'] ?? '3001', 10);
+  const PORT     = parseInt(process.env['API_PORT'] ?? '3001', 10);
+  const API_HOST = process.env['API_HOST'] ?? '0.0.0.0';
   httpCreateServer((req, res) => {
     handleRequest(req, res).catch((err: unknown) => {
       console.error('API error:', err);
       json(res, 500, { error: 'Internal server error' });
     });
-  }).listen(PORT, () => {
+  }).listen(PORT, API_HOST, () => {
     startPollers();
 
     const e = process.env;
@@ -4144,7 +4514,7 @@ if ((import.meta as { main?: boolean }).main) {
     const maxLabel = Math.max(...cfgs.map(([l]) => l.length));
     const configuredCount = cfgs.filter(([, v]) => v).length;
 
-    console.log(`\nTWM API server → http://localhost:${PORT}`);
+    console.log(`\nTWM API server → http://${API_HOST === '0.0.0.0' ? 'localhost' : API_HOST}:${PORT}`);
     console.log(`  ${configuredCount}/${cfgs.length} integrations configured\n`);
 
     // Group output by category

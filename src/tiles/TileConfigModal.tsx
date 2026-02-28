@@ -1,7 +1,7 @@
 import { createSignal, Show } from 'solid-js';
 import type { JSX } from 'solid-js';
 import type { TileConfig } from './TileConfig';
-import { TILE_POLL_MS } from './TileConfig';
+import { TILE_POLL_MS, TILE_SSE_CHANNEL, WEBHOOK_CAPABLE, WEBHOOK_PROVIDER } from './TileConfig';
 import { API_BASE_URL } from '../data/api';
 
 interface Props {
@@ -16,6 +16,9 @@ export function TileConfigModal(props: Props): JSX.Element {
 
   const [title, setTitle] = createSignal(props.tile.title ?? '');
   const [intervalSec, setIntervalSec] = createSignal(String(defaultIntervalSec));
+  const [deliveryMode, setDeliveryMode] = createSignal<'poll' | 'webhook'>(
+    props.tile.deliveryMode ?? 'poll'
+  );
   const [pageSize, setPageSize] = createSignal(String(props.tile.pageSize ?? 10));
   const [fetchLimit, setFetchLimit] = createSignal(String(props.tile.fetchLimit ?? ''));
   const [showLastUpdated, setShowLastUpdated] = createSignal(props.tile.showLastUpdated !== false);
@@ -47,6 +50,9 @@ export function TileConfigModal(props: Props): JSX.Element {
   const [wsFieldLabels, setWsFieldLabels] = createSignal(props.tile.ws?.fieldLabels ?? '');
   const [wsChartField, setWsChartField] = createSignal(props.tile.ws?.chartField ?? '');
   const [wsChartType, setWsChartType] = createSignal<'line' | 'bar' | 'candle'>(props.tile.ws?.chartType ?? 'line');
+  const [wsChartBufferMaxPoints, setWsChartBufferMaxPoints] = createSignal(
+    String(props.tile.ws?.chartBufferMaxPoints ?? 500)
+  );
 
   // Custom API fields
   const [caUrl, setCaUrl]         = createSignal(props.tile.customApi?.url ?? '');
@@ -128,6 +134,7 @@ export function TileConfigModal(props: Props): JSX.Element {
       fetchLimit: (fl >= 1) ? fl : undefined,
       showLastUpdated: showLastUpdated(),
       displayMode: displayMode(),
+      deliveryMode: WEBHOOK_CAPABLE.has(props.tile.type) ? deliveryMode() : undefined,
     };
 
     if (props.tile.type === 'rss-feed') {
@@ -159,6 +166,7 @@ export function TileConfigModal(props: Props): JSX.Element {
         fieldLabels: wsFieldLabels().trim() || undefined,
         chartField: wsChartField().trim() || undefined,
         chartType: wsChartField().trim() ? wsChartType() : undefined,
+        chartBufferMaxPoints: wsChartField().trim() ? (parseInt(wsChartBufferMaxPoints(), 10) || 500) : undefined,
       };
     }
 
@@ -192,6 +200,16 @@ export function TileConfigModal(props: Props): JSX.Element {
 
     if (props.tile.type === 'reddit-keyword-monitor') {
       updated.keywords = keywords().trim() || undefined;
+    }
+
+    // Sync delivery mode with the server for webhook-capable tiles.
+    if (WEBHOOK_CAPABLE.has(props.tile.type)) {
+      const channel = TILE_SSE_CHANNEL[props.tile.type] ?? props.tile.type;
+      void fetch(`${API_BASE_URL}/api/poll/set-delivery/${channel}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: deliveryMode() }),
+      });
     }
 
     props.onSave(updated);
@@ -232,13 +250,46 @@ export function TileConfigModal(props: Props): JSX.Element {
               onInput={(e) => setTitle(e.currentTarget.value)} />
           </label>
 
-          <label class="field">
-            <span class="field__label">Refresh interval (seconds)</span>
-            <input class="field__input" type="number" min="0"
-              value={intervalSec()}
-              onInput={(e) => setIntervalSec(e.currentTarget.value)} />
-            <span class="field__hint">Set to 0 to disable automatic refresh (manual only)</span>
-          </label>
+          <Show when={WEBHOOK_CAPABLE.has(props.tile.type)}>
+            <fieldset class="field">
+              <legend class="field__label">Delivery mode</legend>
+              <label class="field__radio">
+                <input type="radio" name="deliveryMode" value="poll"
+                  checked={deliveryMode() === 'poll'}
+                  onChange={() => setDeliveryMode('poll')} /> Poll (server fetches on a schedule)
+              </label>
+              <label class="field__radio">
+                <input type="radio" name="deliveryMode" value="webhook"
+                  checked={deliveryMode() === 'webhook'}
+                  onChange={() => setDeliveryMode('webhook')} /> Webhook (provider pushes updates)
+              </label>
+            </fieldset>
+            <Show when={deliveryMode() === 'webhook'}>
+              <div class="field">
+                <span class="field__label">Webhook URL</span>
+                <div style={{ display: 'flex', gap: '6px', 'align-items': 'center' }}>
+                  <code class="field__input" style={{ flex: 1, padding: '6px 8px', 'font-size': '0.85em', cursor: 'text', 'user-select': 'all' }}>
+                    {API_BASE_URL}/api/webhooks/{WEBHOOK_PROVIDER[props.tile.type]}
+                  </code>
+                  <button class="btn btn--neutral btn--sm"
+                    onClick={() => void navigator.clipboard.writeText(`${API_BASE_URL}/api/webhooks/${WEBHOOK_PROVIDER[props.tile.type] ?? ''}`)}>
+                    Copy
+                  </button>
+                </div>
+                <span class="field__hint">Configure your provider to POST events to this URL. Polling is suspended while webhook mode is active.</span>
+              </div>
+            </Show>
+          </Show>
+
+          <Show when={deliveryMode() === 'poll' || !WEBHOOK_CAPABLE.has(props.tile.type)}>
+            <label class="field">
+              <span class="field__label">Refresh interval (seconds)</span>
+              <input class="field__input" type="number" min="0"
+                value={intervalSec()}
+                onInput={(e) => setIntervalSec(e.currentTarget.value)} />
+              <span class="field__hint">Set to 0 to disable automatic refresh (manual only)</span>
+            </label>
+          </Show>
 
           <Show when={!isWs()}>
             <label class="field">
@@ -427,6 +478,13 @@ export function TileConfigModal(props: Props): JSX.Element {
                     onChange={() => setWsChartType('candle')} /> Candle
                 </label>
               </fieldset>
+              <label class="field">
+                <span class="field__label">Buffer size (max points)</span>
+                <input class="field__input" type="number" min="10" max="10000"
+                  value={wsChartBufferMaxPoints()}
+                  onInput={(e) => setWsChartBufferMaxPoints(e.currentTarget.value)} />
+                <span class="field__hint">Number of data points to keep and restore across page reloads (default 500).</span>
+              </label>
             </Show>
             <div class="field">
               <button

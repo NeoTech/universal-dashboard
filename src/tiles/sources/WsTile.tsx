@@ -21,6 +21,8 @@ function getField(obj: unknown, path: string): string {
 
 interface Props {
   config: WsTileConfig;
+  /** Tile ID used to key sessionStorage entries for chart buffer persistence. */
+  tileId?: string;
 }
 
 interface WsMessage {
@@ -34,14 +36,67 @@ let msgId = 0;
 const BASE_DELAY_MS  = 2_000;
 const MAX_DELAY_MS   = 30_000;
 
+/** Read back the persisted chart view mode ('data' | 'chart') from sessionStorage. */
+function readStoredView(tileId: string | undefined): 'chart' | 'data' {
+  if (!tileId) return 'data';
+  try {
+    const v = sessionStorage.getItem(`twm-ws-view-${tileId}`);
+    return v === 'chart' ? 'chart' : 'data';
+  } catch {
+    return 'data';
+  }
+}
+
+/** Read back a persisted chart buffer from sessionStorage. Validates each element is finite. */
+function readStoredBuffer(tileId: string | undefined, chartField: string | undefined): number[] {
+  if (!tileId || !chartField) return [];
+  try {
+    const stored = sessionStorage.getItem(`twm-ws-buf-${tileId}-${chartField}`);
+    if (!stored) return [];
+    const arr = JSON.parse(stored) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return (arr as unknown[]).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  } catch {
+    return [];
+  }
+}
+
 export function WsTile(props: Props): JSX.Element {
   const tileRefresh = useTileRefresh();
   const max = () => props.config.maxMessages ?? 50;
   const [messages, setMessages] = createSignal<WsMessage[]>([]);
   const [status, setStatus] = createSignal<'connecting' | 'open' | 'closed' | 'error' | 'reconnecting'>('connecting');
-  const [chartBuffer, setChartBuffer] = createSignal<number[]>([]);
-  const [chartView, setChartView] = createSignal<'chart' | 'data'>('data');
+  // TWM-134-2: pre-populate chart buffer from sessionStorage on init
+  const [chartBuffer, setChartBuffer] = createSignal<number[]>(
+    readStoredBuffer(props.tileId, props.config.chartField)
+  );
+  const [chartView, setChartView] = createSignal<'chart' | 'data'>(readStoredView(props.tileId));
+
+  /** Set chart view and persist to sessionStorage. */
+  function pickView(v: 'chart' | 'data'): void {
+    setChartView(v);
+    if (props.tileId) {
+      try { sessionStorage.setItem(`twm-ws-view-${props.tileId}`, v); } catch { /* ignore */ }
+    }
+  }
+
   let listEl: HTMLDivElement | undefined;
+
+  // TWM-134-3: remove sessionStorage entry when tile is removed, but NOT on page reload
+  let isUnloading = false;
+  const onBeforeUnload = () => { isUnloading = true; };
+  window.addEventListener('beforeunload', onBeforeUnload);
+  onCleanup(() => {
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    if (!isUnloading && props.tileId) {
+      try {
+        sessionStorage.removeItem(`twm-ws-view-${props.tileId}`);
+        if (props.config.chartField) {
+          sessionStorage.removeItem(`twm-ws-buf-${props.tileId}-${props.config.chartField}`);
+        }
+      } catch { /* ignore */ }
+    }
+  });
 
   // Re-runs on mount and whenever tileRefresh() increments (manual/timer refresh = reconnect)
   // or whenever the WebSocket URL changes (user edits config).
@@ -90,12 +145,22 @@ export function WsTile(props: Props): JSX.Element {
         try { parsed = JSON.parse(raw); } catch { /* keep raw */ }
         const msg: WsMessage = { id: ++msgId, raw, parsed, ts: new Date() };
         setMessages((prev) => [...prev, msg].slice(-max()));
-        // Accumulate numeric chart values when chartField is configured
+        // TWM-134-1: accumulate numeric chart values; persist to sessionStorage on every push
         const cf = props.config.chartField;
         if (cf) {
           const numVal = parseFloat(getField(parsed, cf));
           if (!Number.isNaN(numVal)) {
-            setChartBuffer((prev) => [...prev, numVal].slice(-100));
+            const maxPoints = props.config.chartBufferMaxPoints ?? 500;
+            const tileId = props.tileId;
+            setChartBuffer((prev) => {
+              const next = [...prev, numVal].slice(-maxPoints);
+              if (tileId && cf) {
+                try {
+                  sessionStorage.setItem(`twm-ws-buf-${tileId}-${cf}`, JSON.stringify(next));
+                } catch { /* storage quota exceeded - ignore */ }
+              }
+              return next;
+            });
           }
         }
         sseReceivedAt.set('websocket', Date.now());
@@ -137,10 +202,10 @@ export function WsTile(props: Props): JSX.Element {
         <div class="mini-chart__toggle">
           <button
             class={`mini-chart__toggle-btn${chartView() === 'data' ? ' mini-chart__toggle-btn--active' : ''}`}
-            onClick={() => setChartView('data')}>Data</button>
+            onClick={() => pickView('data')}>Data</button>
           <button
             class={`mini-chart__toggle-btn${chartView() === 'chart' ? ' mini-chart__toggle-btn--active' : ''}`}
-            onClick={() => setChartView('chart')}>Chart</button>
+            onClick={() => pickView('chart')}>Chart</button>
         </div>
         <Show when={chartView() === 'chart'}>
           <MiniChart

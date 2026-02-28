@@ -23,6 +23,10 @@ interface AuthCtxValue {
   token:           () => string | null;
   user:            () => AuthUser | null;
   authEnabled:     () => boolean;
+  /** True once /api/auth/config has resolved (or failed). Gate tiles behind this. */
+  authReady:       () => boolean;
+  provider:        () => 'local' | 'saml';
+  samlLoginUrl:    () => string | null;
   isAuthenticated: () => boolean;
   login:           (token: string, user: AuthUser) => void;
   logout:          () => void;
@@ -41,6 +45,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const [token, setToken]           = createSignal<string | null>(localStorage.getItem(TOKEN_KEY));
   const [user,  setUser]            = createSignal<AuthUser | null>(readLocal<AuthUser>(USER_KEY));
   const [authEnabled, setAuthEnabled] = createSignal(false);
+  // authReady: false until /api/auth/config has resolved — prevents tiles from
+  // mounting and firing requests before we know whether auth is required.
+  // Starts true in test environments (import.meta.env.VITEST) where there is no server.
+  const [authReady, setAuthReady]   = createSignal(!!import.meta.env['VITEST']);
+  const [provider, setProvider]     = createSignal<'local' | 'saml'>('local');
+  const [samlLoginUrl, setSamlLoginUrl] = createSignal<string | null>(null);
 
   onMount(() => {
     // Patch window.fetch once to auto-inject the Bearer token on /api/ calls.
@@ -64,8 +74,36 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // Discover server auth mode.
     void fetch(`${API_BASE_URL}/api/auth/config`)
       .then((r) => r.json())
-      .then((cfg: unknown) => { if (cfg && typeof cfg === 'object' && 'enabled' in cfg) setAuthEnabled((cfg as { enabled: boolean }).enabled); })
-      .catch(() => { /* server not reachable yet */ });
+      .then((cfg: unknown) => {
+        if (cfg && typeof cfg === 'object') {
+          const c = cfg as { enabled?: boolean; provider?: string; samlLoginUrl?: string | null };
+          if (typeof c.enabled === 'boolean') setAuthEnabled(c.enabled);
+          if (c.provider === 'saml') setProvider('saml');
+          if (c.samlLoginUrl) setSamlLoginUrl(c.samlLoginUrl);
+        }
+      })
+      .catch(() => { /* server not reachable yet — proceed unauthenticated */ })
+      .finally(() => { setAuthReady(true); });
+
+    // Consume ?token= from the URL (issued after SAML callback redirect).
+    const qs = new URLSearchParams(window.location.search);
+    const urlToken = qs.get('token');
+    if (urlToken) {
+      // Strip the token param from the URL without triggering a reload.
+      qs.delete('token');
+      const newSearch = qs.toString();
+      history.replaceState(null, '', window.location.pathname + (newSearch ? '?' + newSearch : ''));
+      // Fetch the user info to populate the context.
+      void fetch(`${API_BASE_URL}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${urlToken}` },
+      })
+        .then((r) => r.ok ? r.json() : Promise.reject(new Error('me failed')))
+        .then((u: unknown) => {
+          const authUser = u as AuthUser;
+          if (authUser.id && authUser.username) login(urlToken, authUser);
+        })
+        .catch(() => { /* token invalid — ignore, stay logged out */ });
+    }
   });
 
   function login(t: string, u: AuthUser): void {
@@ -84,6 +122,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     token,
     user,
     authEnabled,
+    authReady,
+    provider,
+    samlLoginUrl,
     isAuthenticated: () => !!token(),
     login,
     logout,

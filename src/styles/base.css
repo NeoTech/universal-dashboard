@@ -1184,7 +1184,41 @@ body {
   gap: 6px;
 }
 
-/* ── Modal footer ────────────────────────────────────────────────────────── */
+/* ── Dashboard import confirm / error banners ────────────────────────────── */
+.dashboard-import-confirm,
+.dashboard-import-error {
+  position: fixed;
+  bottom: 36px; /* above status bar */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  white-space: nowrap;
+}
+
+.dashboard-import-confirm {
+  background: var(--color-surface, #2a2a2a);
+  border: 1px solid var(--color-border, #444);
+  color: var(--color-text, #e0e0e0);
+}
+
+.dashboard-import-confirm__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.dashboard-import-error {
+  background: #3b1a1a;
+  border: 1px solid #7a2020;
+  color: #f8a0a0;
+}
+
 .modal__footer {
   display: flex;
   align-items: center;

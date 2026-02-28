@@ -11,6 +11,15 @@ interface EnvEntry {
   value: string;
 }
 
+interface ServerInfo {
+  boundAddress: string;
+  stripeApiUrl: string;
+  githubApiUrl: string;
+  cloudflareApiUrl: string;
+  paypalApiUrl: string;
+  backendBaseUrl: string;
+}
+
 /** Keys that contain these substrings are treated as sensitive (masked by default). */
 const SENSITIVE = ['TOKEN', 'SECRET', 'KEY', 'PASSWORD', 'PASS', 'CREDENTIALS'];
 const isSensitive = (key: string) =>
@@ -29,6 +38,18 @@ export function EnvConfigModal(props: Props): JSX.Element {
   // New-variable inputs
   const [newKey, setNewKey] = createSignal('');
   const [newVal, setNewVal] = createSignal('');
+
+  // Server info (read-only, from /api/server/info)
+  const [serverInfo, setServerInfo] = createSignal<ServerInfo | null>(null);
+
+  createEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/server/info`);
+        if (res.ok) setServerInfo(await res.json() as ServerInfo);
+      } catch { /* ignore — server info is decorative */ }
+    })();
+  });
 
   createEffect(() => {
     void (async () => {
@@ -152,6 +173,24 @@ export function EnvConfigModal(props: Props): JSX.Element {
             ⚠ Changes are written to <code>.env</code> on disk.
             Restart the API server for new values to take effect.
           </p>
+
+          <Show when={serverInfo()}>
+            {(info) => (
+              <section class="env-config-modal__server-info">
+                <h3 class="env-config-modal__server-info-heading">Server</h3>
+                <dl class="env-config-modal__info-grid">
+                  <dt>Bound address</dt><dd>{info().boundAddress}</dd>
+                  <dt>Stripe API</dt><dd>{info().stripeApiUrl}</dd>
+                  <dt>GitHub API</dt><dd>{info().githubApiUrl}</dd>
+                  <dt>Cloudflare API</dt><dd>{info().cloudflareApiUrl}</dd>
+                  <dt>PayPal API</dt><dd>{info().paypalApiUrl}</dd>
+                  <Show when={info().backendBaseUrl}>
+                    <dt>Backend base</dt><dd>{info().backendBaseUrl}</dd>
+                  </Show>
+                </dl>
+              </section>
+            )}
+          </Show>
 
           <Show when={loading()}>
             <p class="env-config-modal__loading">Loading…</p>

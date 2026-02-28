@@ -92,7 +92,7 @@ export function renderTile(tile: TileConfig): JSX.Element {
     return <RestTile config={tile.rest} />;
   }
   if (tile.type === 'websocket' && tile.ws) {
-    return <WsTile config={tile.ws} />;
+    return <WsTile config={tile.ws} tileId={tile.id} />;
   }
   if (tile.type === 'custom-api') {
     return <CustomApiTile config={tile.customApi ?? { url: '' }} />;

@@ -226,15 +226,17 @@ export function App(props: Props): JSX.Element {
   );
 }
 
-/** Shows LoginModal when the server requires auth and no valid token is present. */
+/** Shows LoginModal when the server requires auth and no valid token is present.
+ *  Blocks rendering children entirely until /api/auth/config has resolved so
+ *  tiles do not fire requests before we know whether auth is required. */
 function AuthGate(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   return (
     <>
-      <Show when={auth.authEnabled() && !auth.isAuthenticated()}>
+      <Show when={auth.authReady() && auth.authEnabled() && !auth.isAuthenticated()}>
         <LoginModal />
       </Show>
-      <Show when={!auth.authEnabled() || auth.isAuthenticated()}>
+      <Show when={auth.authReady() && (!auth.authEnabled() || auth.isAuthenticated())}>
         {props.children}
       </Show>
     </>

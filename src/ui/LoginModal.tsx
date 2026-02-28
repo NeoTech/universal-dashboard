@@ -14,6 +14,8 @@ interface LoginResponse {
 export function LoginModal(): JSX.Element {
   const auth = useAuth();
 
+  // All signals declared unconditionally — SolidJS requires signal creation
+  // to happen during the synchronous component setup, not inside a branch.
   const [mode, setMode]                       = createSignal<Mode>('login');
   const [username, setUsername]               = createSignal('');
   const [password, setPassword]               = createSignal('');
@@ -63,71 +65,92 @@ export function LoginModal(): JSX.Element {
       <div class="login-modal">
         <div class="login-modal__logo">⊞</div>
         <h1 class="login-modal__title">Tiling Dashboard</h1>
-        <p class="login-modal__subtitle">
-          {mode() === 'login' ? 'Sign in to your dashboard' : 'Create a new account'}
-        </p>
 
-        <form class="login-modal__form" onSubmit={handleSubmit}>
-          <label class="field">
-            <span class="field__label">Username</span>
-            <input
-              class="field__input"
-              type="text"
-              value={username()}
-              onInput={(e) => setUsername(e.currentTarget.value)}
-              required
-              minLength={2}
-              autocomplete="username"
-              autofocus
-            />
-          </label>
+        {/* ── SAML SSO path — rendered reactively once /api/auth/config resolves ── */}
+        <Show
+          when={auth.provider() === 'saml'}
+          fallback={
+            <>
+              <p class="login-modal__subtitle">
+                {mode() === 'login' ? 'Sign in to your dashboard' : 'Create a new account'}
+              </p>
 
-          <label class="field">
-            <span class="field__label">Password</span>
-            <input
-              class="field__input"
-              type="password"
-              value={password()}
-              onInput={(e) => setPassword(e.currentTarget.value)}
-              required
-              minLength={6}
-              autocomplete={mode() === 'login' ? 'current-password' : 'new-password'}
-            />
-          </label>
+              <form class="login-modal__form" onSubmit={handleSubmit}>
+                <label class="field">
+                  <span class="field__label">Username</span>
+                  <input
+                    class="field__input"
+                    type="text"
+                    value={username()}
+                    onInput={(e) => setUsername(e.currentTarget.value)}
+                    required
+                    minLength={2}
+                    autocomplete="username"
+                    autofocus
+                  />
+                </label>
 
-          <Show when={mode() === 'register'}>
-            <label class="field">
-              <span class="field__label">Confirm Password</span>
-              <input
-                class="field__input"
-                type="password"
-                value={confirmPassword()}
-                onInput={(e) => setConfirmPassword(e.currentTarget.value)}
-                required
-                autocomplete="new-password"
-              />
-            </label>
-          </Show>
+                <label class="field">
+                  <span class="field__label">Password</span>
+                  <input
+                    class="field__input"
+                    type="password"
+                    value={password()}
+                    onInput={(e) => setPassword(e.currentTarget.value)}
+                    required
+                    minLength={6}
+                    autocomplete={mode() === 'login' ? 'current-password' : 'new-password'}
+                  />
+                </label>
 
-          <Show when={error()}>
-            <p class="login-modal__error">{error()}</p>
-          </Show>
+                <Show when={mode() === 'register'}>
+                  <label class="field">
+                    <span class="field__label">Confirm Password</span>
+                    <input
+                      class="field__input"
+                      type="password"
+                      value={confirmPassword()}
+                      onInput={(e) => setConfirmPassword(e.currentTarget.value)}
+                      required
+                      autocomplete="new-password"
+                    />
+                  </label>
+                </Show>
 
+                <Show when={error()}>
+                  <p class="login-modal__error">{error()}</p>
+                </Show>
+
+                <button
+                  class="btn btn--primary login-modal__submit"
+                  type="submit"
+                  disabled={loading()}
+                >
+                  {loading() ? '…' : mode() === 'login' ? 'Sign In' : 'Create Account'}
+                </button>
+              </form>
+
+              <button class="login-modal__toggle" type="button" onClick={switchMode}>
+                {mode() === 'login'
+                  ? "Don't have an account? Register"
+                  : 'Already have an account? Sign In'}
+              </button>
+            </>
+          }
+        >
+          <p class="login-modal__subtitle">Sign in via your organisation's identity provider</p>
           <button
             class="btn btn--primary login-modal__submit"
-            type="submit"
-            disabled={loading()}
+            type="button"
+            onClick={() => {
+              window.location.href = auth.samlLoginUrl() ?? `${API_BASE_URL}/api/auth/saml/login`;
+            }}
           >
-            {loading() ? '…' : mode() === 'login' ? 'Sign In' : 'Create Account'}
+            Sign in with SSO
           </button>
-        </form>
-
-        <button class="login-modal__toggle" type="button" onClick={switchMode}>
-          {mode() === 'login'
-            ? "Don't have an account? Register"
-            : 'Already have an account? Sign In'}
-        </button>
+        </Show>
       </div>
     </div>
   );
 }
+

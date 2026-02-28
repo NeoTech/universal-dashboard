@@ -20,6 +20,7 @@ export function AddTileModal(props: Props): JSX.Element {
   const [maxMessages, setMaxMessages] = createSignal('50');
   const [rssUrl, setRssUrl] = createSignal('');
   const [rssMaxItems, setRssMaxItems] = createSignal('20');
+  const [caUrl, setCaUrl] = createSignal('');
   const rssUrlValid = () => { try { const u = new URL(rssUrl()); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } };
 
   function reset(): void {
@@ -32,6 +33,7 @@ export function AddTileModal(props: Props): JSX.Element {
     setMaxMessages('50');
     setRssUrl('');
     setRssMaxItems('20');
+    setCaUrl('');
   }
 
   function handleClose(): void {
@@ -66,7 +68,7 @@ export function AddTileModal(props: Props): JSX.Element {
 
   function selectTile(def: TileDefinition): void {
     if (def.status === 'coming-soon') return;
-    if (def.type === 'rest' || def.type === 'websocket' || def.type === 'rss-feed') {
+    if (def.type === 'rest' || def.type === 'websocket' || def.type === 'rss-feed' || def.type === 'custom-api') {
       setConfiguring(def);
       return;
     }
@@ -85,6 +87,8 @@ export function AddTileModal(props: Props): JSX.Element {
       tile = makeTile('rss-feed', { x: 32, y: 32, rss: { url: rssUrl().trim(), maxItems: parseInt(rssMaxItems(), 10) || 20 } });
     } else if (cfg.type === 'rest') {
       tile = makeTile('rest', { x: 32, y: 32, title: restUrl(), rest: { url: restUrl(), headers, refreshInterval: 30 } });
+    } else if (cfg.type === 'custom-api') {
+      tile = makeTile('custom-api', { x: 32, y: 32, title: caUrl().trim(), customApi: { url: caUrl().trim(), method: 'GET', refreshInterval: 30 } });
     } else {
       tile = makeTile('websocket', { x: 32, y: 32, title: wsUrl(), ws: { url: wsUrl(), maxMessages: parseInt(maxMessages(), 10) || 50 } });
     }
@@ -144,12 +148,22 @@ export function AddTileModal(props: Props): JSX.Element {
                     value={maxMessages()} onInput={(e) => setMaxMessages(e.currentTarget.value)} />
                 </label>
               </Show>
+              <Show when={configuring()?.type === 'custom-api'}>
+                <label class="field">
+                  <span class="field__label">Endpoint URL</span>
+                  <input class="field__input" type="url" placeholder="https://api.example.com/data"
+                    value={caUrl()} onInput={(e) => setCaUrl(e.currentTarget.value)} />
+                  <span class="field__hint">You can configure method, headers, and more after adding.</span>
+                </label>
+              </Show>
               <div class="modal__actions">
                 <button class="btn" onClick={() => setConfiguring(null)}>← Back</button>
                 <button class="btn btn--primary" onClick={handleAdd}
                   disabled={
                     configuring()?.type === 'rss-feed' ? !rssUrlValid() :
-                    configuring()?.type === 'rest' ? !restUrl() : !wsUrl()
+                    configuring()?.type === 'rest' ? !restUrl() :
+                    configuring()?.type === 'custom-api' ? caUrl().trim().length === 0 :
+                    !wsUrl()
                   }>
                   Add tile
                 </button>

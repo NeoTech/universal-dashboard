@@ -4,6 +4,7 @@ import type { WsTileConfig } from '../TileConfig';
 import { useTileRefresh } from '../TileRefreshContext';
 import { sseReceivedAt, setSseRevision } from '../../ui/useSseChannel';
 import { BaseTile } from '../BaseTile';
+import { MiniChart } from '../../ui/MiniChart';
 
 /** Traverse dot-path like "payload.price" on an arbitrary object. */
 function getField(obj: unknown, path: string): string {
@@ -38,6 +39,8 @@ export function WsTile(props: Props): JSX.Element {
   const max = () => props.config.maxMessages ?? 50;
   const [messages, setMessages] = createSignal<WsMessage[]>([]);
   const [status, setStatus] = createSignal<'connecting' | 'open' | 'closed' | 'error' | 'reconnecting'>('connecting');
+  const [chartBuffer, setChartBuffer] = createSignal<number[]>([]);
+  const [chartView, setChartView] = createSignal<'chart' | 'data'>('data');
   let listEl: HTMLDivElement | undefined;
 
   // Re-runs on mount and whenever tileRefresh() increments (manual/timer refresh = reconnect)
@@ -87,6 +90,14 @@ export function WsTile(props: Props): JSX.Element {
         try { parsed = JSON.parse(raw); } catch { /* keep raw */ }
         const msg: WsMessage = { id: ++msgId, raw, parsed, ts: new Date() };
         setMessages((prev) => [...prev, msg].slice(-max()));
+        // Accumulate numeric chart values when chartField is configured
+        const cf = props.config.chartField;
+        if (cf) {
+          const numVal = parseFloat(getField(parsed, cf));
+          if (!Number.isNaN(numVal)) {
+            setChartBuffer((prev) => [...prev, numVal].slice(-100));
+          }
+        }
         sseReceivedAt.set('websocket', Date.now());
         setSseRevision(r => r + 1);
         if (listEl) listEl.scrollTop = listEl.scrollHeight;
@@ -117,9 +128,29 @@ export function WsTile(props: Props): JSX.Element {
   };
   const hasMappedFields = () => fieldPaths().length > 0;
 
+  const hasChart = () => Boolean(props.config.chartField);
+
   return (
     <BaseTile class="ws-tile">
       <div class={`ws-status ws-status--${status() === 'reconnecting' ? 'connecting' : status()}`}>{statusLabel()}</div>
+      <Show when={hasChart()}>
+        <div class="mini-chart__toggle">
+          <button
+            class={`mini-chart__toggle-btn${chartView() === 'data' ? ' mini-chart__toggle-btn--active' : ''}`}
+            onClick={() => setChartView('data')}>Data</button>
+          <button
+            class={`mini-chart__toggle-btn${chartView() === 'chart' ? ' mini-chart__toggle-btn--active' : ''}`}
+            onClick={() => setChartView('chart')}>Chart</button>
+        </div>
+        <Show when={chartView() === 'chart'}>
+          <MiniChart
+            data={chartBuffer()}
+            type={props.config.chartType ?? 'line'}
+            label={props.config.chartField}
+          />
+        </Show>
+      </Show>
+      <Show when={!hasChart() || chartView() === 'data'}>
       <Show when={hasMappedFields()} fallback={
         <div class="ws-messages" ref={listEl}>
           <For each={messages()}>{(m) => (
@@ -158,6 +189,7 @@ export function WsTile(props: Props): JSX.Element {
             <p class="ws-empty">Waiting for messages…</p>
           )}
         </div>
+      </Show>
       </Show>
     </BaseTile>
   );

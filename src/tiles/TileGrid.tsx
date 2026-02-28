@@ -82,6 +82,9 @@ let copyDragState: {
   origY: number;
 } | null = null;
 
+// Monotonically increasing counter so each "bring to front" gets a unique z-index.
+let zCounter = 0;
+
 export function TileGrid(props: Props): JSX.Element {
   // ── Store keeps tile component instances alive across drag/resize ──────────
   const [tiles, setTiles] = createStore<TileConfig[]>([]);
@@ -91,8 +94,15 @@ export function TileGrid(props: Props): JSX.Element {
   // ID of the tile currently being copy-dragged (for the CSS indicator class)
   const [copyingId, setCopyingId] = createSignal<string | null>(null);
   // ID of the tile actively being dragged — elevated z-index so it renders
-  // above the sticky pagination bars (z-index:1) of other tiles.
+  // above all other tiles while moving.
   const [draggingId, setDraggingId] = createSignal<string | null>(null);
+  // Per-tile z-index map — updated whenever any tile is interacted with.
+  const [zMap, setZMap] = createSignal<Record<string, number>>({});
+
+  /** Raise a tile above all its siblings. Called on every pointerdown on any tile. */
+  function bringToFront(id: string): void {
+    setZMap(prev => ({ ...prev, [id]: ++zCounter }));
+  }
 
   createEffect(() => {
     setTiles(reconcile(props.tiles, { key: 'id', merge: true }));
@@ -110,6 +120,7 @@ export function TileGrid(props: Props): JSX.Element {
   // ── Drag to move ──────────────────────────────────────────────────────────
   function onDragPointerDown(e: PointerEvent, tile: TileConfig): void {
     e.stopPropagation();
+    bringToFront(tile.id);
     if (e.altKey && props.onTileCopy) {
       // ALT+drag → copy mode: record origX/Y so we can restore after drop
       copyDragState = {
@@ -225,13 +236,16 @@ export function TileGrid(props: Props): JSX.Element {
             data-tile-id={tile.id}
             data-tile-type={tile.type}
             classList={{ 'tile--copying': copyingId() === tile.id }}
+            on:pointerdown={() => bringToFront(tile.id)}
             style={{
               position: 'absolute',
               left: `${tile.x}px`,
               top: `${tile.y}px`,
               width: `${tile.w}px`,
               height: `${tile.h}px`,
-              'z-index': draggingId() === tile.id ? '10' : '0',
+              'z-index': draggingId() === tile.id
+                ? String((zMap()[tile.id] ?? 0) + 1000)
+                : String(zMap()[tile.id] ?? 0),
             }}
           >
             {/* Title bar — drag handle */}

@@ -21,6 +21,9 @@ export function EnvConfigModal(props: Props): JSX.Element {
   const [loading, setLoading] = createSignal(true);
   const [saveStatus, setSaveStatus] = createSignal<'idle' | 'saving' | 'ok' | 'error'>('idle');
   const [saveError, setSaveError] = createSignal('');
+  const [reloadStatus, setReloadStatus] = createSignal<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [reloadMsg, setReloadMsg] = createSignal('');
+  const [restartStatus, setRestartStatus] = createSignal<'idle' | 'loading' | 'online'>('idle');
   // Track which sensitive fields are revealed
   const [revealed, setRevealed] = createSignal<Set<string>>(new Set());
   // New-variable inputs
@@ -71,6 +74,39 @@ export function EnvConfigModal(props: Props): JSX.Element {
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
+  }
+
+  async function handleReloadEnv(): Promise<void> {
+    setReloadStatus('loading');
+    setReloadMsg('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/server/reload-env`, { method: 'POST' });
+      const data = await res.json() as { ok: boolean; reloaded?: string[]; error?: string };
+      if (data.ok) {
+        const count = data.reloaded?.length ?? 0;
+        setReloadStatus('ok');
+        setReloadMsg(count === 0 ? 'No changes' : `${count} key${count === 1 ? '' : 's'} updated`);
+      } else {
+        setReloadStatus('error');
+        setReloadMsg(data.error ?? 'Reload failed');
+      }
+    } catch (e: unknown) {
+      setReloadStatus('error');
+      setReloadMsg(e instanceof Error ? e.message : 'Request failed');
+    }
+  }
+
+  async function handleRestartServer(): Promise<void> {
+    setRestartStatus('loading');
+    try {
+      await fetch(`${API_BASE_URL}/api/server/restart`, { method: 'POST' });
+    } catch { /* expected — server shuts down */ }
+    // Poll /health until the server comes back online
+    const poll = setInterval(() => {
+      void fetch(`${API_BASE_URL}/health`).then(r => {
+        if (r.ok) { clearInterval(poll); setRestartStatus('online'); }
+      }).catch(() => { /* still restarting */ });
+    }, 1000);
   }
 
   async function handleSave(): Promise<void> {
@@ -220,7 +256,31 @@ export function EnvConfigModal(props: Props): JSX.Element {
 
         <div class="modal__footer env-config-modal__footer">
           <Show when={saveStatus() === 'ok'}>
-            <span class="env-config-modal__status env-config-modal__status--ok">✔ Saved to .env</span>
+            <div class="env-config-modal__post-save">
+              <span class="env-config-modal__status env-config-modal__status--ok">✔ Saved to .env</span>
+              <button
+                class="btn btn--neutral btn--sm"
+                disabled={reloadStatus() === 'loading'}
+                onClick={() => void handleReloadEnv()}
+                type="button"
+              >
+                {reloadStatus() === 'loading' ? 'Reloading…' : 'Reload env'}
+              </button>
+              <Show when={reloadStatus() === 'ok'}>
+                <span class="env-config-modal__status env-config-modal__status--ok">{reloadMsg()}</span>
+              </Show>
+              <Show when={reloadStatus() === 'error'}>
+                <span class="env-config-modal__status env-config-modal__status--error">{reloadMsg()}</span>
+              </Show>
+              <button
+                class="btn btn--danger btn--sm"
+                disabled={restartStatus() === 'loading'}
+                onClick={() => void handleRestartServer()}
+                type="button"
+              >
+                {restartStatus() === 'loading' ? 'Restarting…' : restartStatus() === 'online' ? 'Server online' : 'Restart server'}
+              </button>
+            </div>
           </Show>
           <Show when={saveStatus() === 'error'}>
             <span class="env-config-modal__status env-config-modal__status--error">✕ {saveError()}</span>

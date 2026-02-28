@@ -40,7 +40,7 @@ export const HINTS_DEFAULT: Hint[] = [
   { keys: 'Ctrl+P',      label: 'Command palette' },
   { keys: 'Ctrl+→/←',   label: 'Switch dashboard' },
   { keys: 'Ctrl+Z',      label: 'Undo' },
-  { keys: '?',           label: 'Help' },
+  { keys: '?',           label: 'Help / Shortcuts' },
 ];
 
 export const HINTS_PALETTE: Hint[] = [

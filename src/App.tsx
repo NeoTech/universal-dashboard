@@ -13,6 +13,7 @@ import { PanelTree } from './renderer/PanelTree';
 import { StatusBar } from './panels/StatusBar';
 import { CommandPalette } from './ui/CommandPalette';
 import type { Command } from './ui/CommandPalette';
+import { HelpModal } from './ui/HelpModal';
 import { HintsProvider, useHints, HINTS_DEFAULT, HINTS_PALETTE } from './ui/HintsContext';
 import { DashboardPanel } from './panels/DashboardPanel';
 import { AuthProvider, useAuth } from './ui/AuthContext';
@@ -39,6 +40,7 @@ function AppInner(props: Props): JSX.Element {
     leaves(restoredTree)[0] ?? (makeLeaf() as { id: string }).id,
   );
   const [isPaletteOpen, setPaletteOpen] = createSignal(false);
+  const [isHelpOpen,    setHelpOpen]    = createSignal(false);
   /** Maps panelId → content type; all panels default to 'dashboard' */
   const [panelTypes] = createSignal<Record<string, string>>({});
   /** Reactive viewport — tracks actual window dimensions */
@@ -106,8 +108,9 @@ function AppInner(props: Props): JSX.Element {
   const kb = props.config.keybindings;
 
   const openPalette = () => { setPaletteOpen(true); setHints(HINTS_PALETTE); };
+  const openHelp    = () => setHelpOpen(true);
   registry.register(kb.openPalette,    'palette',       openPalette);
-  registry.register(kb.help,           'help',          openPalette);
+  registry.register(kb.help,           'help',          openHelp);
   registry.register(kb.nextDashboard,  'next-dashboard', nextDash);
   registry.register(kb.prevDashboard,  'prev-dashboard', prevDash);
   registry.register(kb.undo,           'undo',          commands.find(c => c.id === 'undo')!.run);
@@ -199,6 +202,13 @@ function AppInner(props: Props): JSX.Element {
           setPaletteOpen(false);
           setHints(HINTS_DEFAULT);
         }}
+      />
+
+      {/* Help / keyboard shortcuts modal */}
+      <HelpModal
+        open={isHelpOpen}
+        onClose={() => setHelpOpen(false)}
+        keybindings={props.config.keybindings}
       />
     </div>
   );

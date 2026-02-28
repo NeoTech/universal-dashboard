@@ -38,6 +38,8 @@ import { PRODUCTHUNT_TILE_FACTORIES } from './producthunt/index';
 import { RSS_TILE_FACTORIES } from './rss/index';
 import { RestTile } from './sources/RestTile';
 import { WsTile } from './sources/WsTile';
+import { CustomApiTile } from './sources/CustomApiTile';
+import { GraphqlTile } from './sources/GraphqlTile';
 
 const ALL_FACTORIES = [
   STRIPE_TILE_FACTORIES,
@@ -91,6 +93,12 @@ export function renderTile(tile: TileConfig): JSX.Element {
   }
   if (tile.type === 'websocket' && tile.ws) {
     return <WsTile config={tile.ws} />;
+  }
+  if (tile.type === 'custom-api') {
+    return <CustomApiTile config={tile.customApi ?? { url: '' }} />;
+  }
+  if (tile.type === 'graphql') {
+    return <GraphqlTile config={tile.graphql ?? { url: '', query: '' }} />;
   }
   return <div class="tile-unknown">Unknown tile type: {tile.type}</div>;
 }

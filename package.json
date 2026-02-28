@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "api": "bun run api/server.ts",
+    "watch-api": "bun api/watch.ts",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",

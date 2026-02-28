@@ -819,6 +819,105 @@ body {
 .test-connection-result--ok    { color: var(--twm-color-success, #22c55e); }
 .test-connection-result--error { color: var(--twm-color-danger,  #ef4444); }
 
+/* ===== Help Modal ===== */
+.help-modal-overlay {
+  position: fixed; inset: 0; z-index: 400;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.help-modal {
+  background: var(--twm-color-surface);
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius-lg);
+  width: 720px; max-width: 96vw;
+  max-height: 80vh;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+.help-modal__header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--twm-color-border);
+  flex-shrink: 0;
+}
+.help-modal__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--twm-color-text);
+}
+.help-modal__close {
+  background: none; border: none;
+  color: var(--twm-color-text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--twm-radius);
+  line-height: 1;
+}
+.help-modal__close:hover { background: var(--twm-color-hover); color: var(--twm-color-text); }
+.help-modal__body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 16px 20px;
+  display: flex; flex-direction: column; gap: 24px;
+}
+.help-modal__section-title {
+  margin: 0 0 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--twm-color-text-muted);
+}
+.help-modal__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.825rem;
+}
+.help-modal__table th {
+  text-align: left;
+  padding: 4px 10px 6px;
+  color: var(--twm-color-text-muted);
+  border-bottom: 1px solid var(--twm-color-border);
+  font-weight: 500;
+}
+.help-modal__table tr + tr td { border-top: 1px solid color-mix(in srgb, var(--twm-color-border) 50%, transparent); }
+.help-modal__table td { padding: 6px 10px; vertical-align: middle; }
+.help-modal__action { color: var(--twm-color-text); white-space: nowrap; font-weight: 500; }
+.help-modal__desc { color: var(--twm-color-text-muted); }
+.help-modal__key kbd {
+  display: inline-block;
+  background: var(--twm-color-bg);
+  border: 1px solid var(--twm-color-border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  color: var(--twm-color-text);
+  white-space: nowrap;
+}
+.help-modal__footer {
+  margin: 0;
+  padding: 10px 20px;
+  font-size: 0.75rem;
+  color: var(--twm-color-text-muted);
+  border-top: 1px solid var(--twm-color-border);
+  flex-shrink: 0;
+}
+.help-modal__footer kbd {
+  background: var(--twm-color-bg);
+  border: 1px solid var(--twm-color-border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0px 5px;
+  font-size: 0.7rem;
+  font-family: inherit;
+}
+
 /* ===== Command Palette ===== */
 .command-palette-overlay {
   position: fixed; inset: 0; z-index: 300;
@@ -1213,6 +1312,15 @@ body {
   padding: 10px 16px;
   border-top: 1px solid var(--twm-color-border);
   flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.env-config-modal__post-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  flex-wrap: wrap;
 }
 
 .env-config-modal__status {
@@ -1290,4 +1398,200 @@ body {
 .dashboard-toolbar__user {
   font-size: var(--twm-font-size-sm);
   color: var(--twm-color-text-dim);
+}
+
+/* ── Reddit tiles ───────────────────────────────────────────────────────── */
+.reddit-hot-posts-tile__score {
+  font-weight: 600;
+  color: var(--twm-color-accent, #f97316);
+  white-space: nowrap;
+}
+
+.reddit-keyword-monitor-tile__hint {
+  font-size: var(--twm-font-size-sm);
+  color: var(--twm-color-text-muted);
+  padding: 8px 0;
+  margin: 0;
+}
+
+.reddit-keyword-monitor-tile__row--match {
+  background: color-mix(in srgb, var(--twm-color-accent, #f97316) 8%, transparent);
+}
+
+.reddit-keyword-monitor-tile__badge {
+  display: inline-block;
+  background: color-mix(in srgb, var(--twm-color-accent, #f97316) 20%, transparent);
+  color: var(--twm-color-accent, #f97316);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-right: 3px;
+  white-space: nowrap;
+}
+
+/* ── Custom API tile ────────────────────────────────────────────────────── */
+.custom-api-tile__status {
+  font-size: var(--twm-font-size-xs);
+  color: var(--twm-color-text-dim);
+  margin-bottom: 6px;
+}
+
+.custom-api-tile__kv th.custom-api-tile__kv-key {
+  font-weight: 500;
+  color: var(--twm-color-text-dim);
+  text-align: left;
+  padding-right: 12px;
+  white-space: nowrap;
+  width: 1%;
+}
+
+/* ── MiniChart ──────────────────────────────────────────────────────────── */
+.mini-chart {
+  width: 100%;
+  overflow: hidden;
+  margin: 4px 0 8px;
+}
+
+/* Wrapper that stacks SVG and Y-axis overlay */
+.mini-chart__inner {
+  position: relative;
+  width: 100%;
+}
+
+.mini-chart__svg {
+  display: block;
+  width: 100%;
+  height: 200px;
+}
+
+/* Horizontal guide lines */
+.mini-chart__guide {
+  stroke: var(--twm-color-border);
+  stroke-width: 0.5;
+  stroke-dasharray: 4 4;
+  opacity: 0.5;
+}
+
+.mini-chart__line {
+  /* colour set inline via stroke="var(--accent)" */
+}
+
+.mini-chart__fill {
+  /* colour set inline via fill="url(#...)" */
+}
+
+.mini-chart__bar {
+  fill: var(--twm-color-accent);
+  opacity: 0.85;
+}
+
+/* Line stroke — must be in a CSS rule, not a presentation attribute */
+.mini-chart__line {
+  stroke: var(--twm-color-accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Gradient stops inherit color via CSS, not SVG attributes */
+.mini-chart__grad-stop-top    { stop-color: var(--twm-color-accent); }
+.mini-chart__grad-stop-bottom { stop-color: var(--twm-color-accent); }
+
+.mini-chart__candle--green { fill: #22c55e; }
+.mini-chart__candle--red   { fill: #ef4444; }
+.mini-chart__wick--green   { fill: #22c55e; opacity: 0.7; }
+.mini-chart__wick--red     { fill: #ef4444; opacity: 0.7; }
+
+/* Y-axis price label overlay (positioned over SVG right side) */
+.mini-chart__y-axis {
+  position: absolute;
+  top: 10px;       /* matches PAD_TOP */
+  bottom: 10px;    /* matches PAD_BOTTOM */
+  right: 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.mini-chart__y-label {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--twm-color-text-dim);
+  background: var(--twm-color-bg);
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.mini-chart__label {
+  font-size: var(--twm-font-size-xs);
+  color: var(--twm-color-text-dim);
+  text-align: center;
+  margin-top: 2px;
+}
+
+/* Toggle bar shared by WsTile and RestTile */
+.mini-chart__toggle {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.mini-chart__toggle-btn {
+  padding: 2px 10px;
+  font-size: var(--twm-font-size-xs);
+  border: 1px solid var(--twm-color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--twm-color-text-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mini-chart__toggle-btn:hover {
+  background: var(--twm-color-bg-hover);
+  color: var(--twm-color-text);
+}
+
+.mini-chart__toggle-btn--active {
+  background: var(--twm-color-accent);
+  color: #fff;
+  border-color: var(--twm-color-accent);
+}
+
+/* GraphQL query textarea — monospace, resizable */
+.graphql-tile__query {
+  font-family: var(--twm-font-mono, 'Fira Code', 'Cascadia Code', monospace);
+  min-height: 120px;
+  resize: vertical;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+/* Chart type radio buttons in TileConfigModal */
+fieldset.field {
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius);
+  background: var(--twm-color-surface2);
+  padding: 6px 10px 8px;
+  margin: 0;
+}
+
+fieldset.field legend {
+  padding: 0 4px;
+  color: var(--twm-color-text-dim);
+  font-size: var(--twm-font-size-sm);
+  font-weight: 500;
+}
+
+.field__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 12px;
+  font-size: var(--twm-font-size-sm);
+  cursor: pointer;
 }

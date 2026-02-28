@@ -37,26 +37,62 @@ export function TileConfigModal(props: Props): JSX.Element {
   const [restDisplayMode, setRestDisplayMode] = createSignal<'table' | 'json' | 'text'>(
     props.tile.rest?.displayMode ?? 'table'
   );
+  const [restChartField, setRestChartField] = createSignal(props.tile.rest?.chartField ?? '');
+  const [restChartType, setRestChartType] = createSignal<'line' | 'bar' | 'candle'>(props.tile.rest?.chartType ?? 'line');
 
   // WebSocket fields
   const [wsUrl, setWsUrl] = createSignal(props.tile.ws?.url ?? '');
   const [wsMaxMessages, setWsMaxMessages] = createSignal(String(props.tile.ws?.maxMessages ?? 50));
   const [wsFields, setWsFields] = createSignal(props.tile.ws?.fields ?? '');
   const [wsFieldLabels, setWsFieldLabels] = createSignal(props.tile.ws?.fieldLabels ?? '');
+  const [wsChartField, setWsChartField] = createSignal(props.tile.ws?.chartField ?? '');
+  const [wsChartType, setWsChartType] = createSignal<'line' | 'bar' | 'candle'>(props.tile.ws?.chartType ?? 'line');
+
+  // Custom API fields
+  const [caUrl, setCaUrl]         = createSignal(props.tile.customApi?.url ?? '');
+  const [caMethod, setCaMethod]   = createSignal<'GET'|'POST'|'PUT'|'PATCH'|'DELETE'>(props.tile.customApi?.method ?? 'GET');
+  const [caHeaders, setCaHeaders] = createSignal(
+    props.tile.customApi?.headers ? JSON.stringify(props.tile.customApi.headers, null, 2) : ''
+  );
+  const [caBody, setCaBody]             = createSignal(props.tile.customApi?.body ?? '');
+  const [caDataPath, setCaDataPath]     = createSignal(props.tile.customApi?.dataPath ?? '');
+  const [caDisplayMode, setCaDisplayMode] = createSignal<'table'|'json'|'text'|'key-value'>(
+    props.tile.customApi?.displayMode ?? 'table'
+  );
+
+  // GraphQL fields
+  const [gqlUrl, setGqlUrl]             = createSignal(props.tile.graphql?.url ?? '');
+  const [gqlQuery, setGqlQuery]         = createSignal(props.tile.graphql?.query ?? '');
+  const [gqlVariables, setGqlVariables] = createSignal(props.tile.graphql?.variables ?? '');
+  const [gqlDataPath, setGqlDataPath]   = createSignal(props.tile.graphql?.dataPath ?? '');
+  const [gqlHeaders, setGqlHeaders]     = createSignal(
+    props.tile.graphql?.headers ? JSON.stringify(props.tile.graphql.headers, null, 2) : ''
+  );
+  const [gqlDisplayMode, setGqlDisplayMode] = createSignal<'table'|'json'|'text'>(
+    props.tile.graphql?.displayMode ?? 'json'
+  );
+
+  // Reddit keyword monitor field
+  const [keywords, setKeywords] = createSignal(props.tile.keywords ?? '');
 
   // Test-connection state (shared between REST and WS sections)
   const [testStatus, setTestStatus] = createSignal<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
 
-  async function testConnection(type: 'rest' | 'ws'): Promise<void> {
+  async function testConnection(type: 'rest' | 'ws' | 'graphql'): Promise<void> {
     setTestStatus('loading');
     setTestMessage('');
     try {
       let headers: Record<string, string> = {};
-      try { headers = JSON.parse(restHeaders() || '{}') as Record<string, string>; } catch { /* ignore */ }
+      try {
+        const src = type === 'graphql' ? gqlHeaders() : restHeaders();
+        headers = JSON.parse(src || '{}') as Record<string, string>;
+      } catch { /* ignore */ }
       const body = type === 'rest'
         ? { type: 'rest', url: restUrl().trim(), headers }
-        : { type: 'ws',  url: wsUrl().trim() };
+        : type === 'ws'
+        ? { type: 'ws',  url: wsUrl().trim() }
+        : { type: 'graphql', url: gqlUrl().trim(), query: gqlQuery().trim() || '{__typename}', headers };
       const res = await fetch(`${API_BASE_URL}/api/test-connection`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -64,9 +100,9 @@ export function TileConfigModal(props: Props): JSX.Element {
       });
       const data = await res.json() as { ok: boolean; status?: number; statusText?: string; preview?: string; error?: string };
       if (data.ok) {
-        const msg = type === 'rest'
-          ? `HTTP ${data.status ?? ''} ${data.statusText ?? ''}`.trim()
-          : 'Connected successfully';
+        const msg = type === 'ws'
+          ? 'Connected successfully'
+          : `HTTP ${data.status ?? ''} ${data.statusText ?? ''}`.trim();
         setTestStatus('ok');
         setTestMessage(msg);
       } else {
@@ -110,6 +146,8 @@ export function TileConfigModal(props: Props): JSX.Element {
         headers,
         refreshInterval: ms / 1000,
         displayMode: restDisplayMode(),
+        chartField: restChartField().trim() || undefined,
+        chartType: restChartField().trim() ? restChartType() : undefined,
       };
     }
 
@@ -119,7 +157,41 @@ export function TileConfigModal(props: Props): JSX.Element {
         maxMessages: parseInt(wsMaxMessages(), 10) || 50,
         fields: wsFields().trim() || undefined,
         fieldLabels: wsFieldLabels().trim() || undefined,
+        chartField: wsChartField().trim() || undefined,
+        chartType: wsChartField().trim() ? wsChartType() : undefined,
       };
+    }
+
+    if (props.tile.type === 'custom-api') {
+      let headers: Record<string, string> = {};
+      try { headers = JSON.parse(caHeaders() || '{}') as Record<string, string>; } catch { /* ignore */ }
+      updated.customApi = {
+        url: caUrl().trim(),
+        method: caMethod(),
+        headers,
+        body: caBody().trim() || undefined,
+        dataPath: caDataPath().trim() || undefined,
+        displayMode: caDisplayMode(),
+        refreshInterval: ms / 1000,
+      };
+    }
+
+    if (props.tile.type === 'graphql') {
+      let headers: Record<string, string> = {};
+      try { headers = JSON.parse(gqlHeaders() || '{}') as Record<string, string>; } catch { /* ignore */ }
+      updated.graphql = {
+        url: gqlUrl().trim(),
+        query: gqlQuery().trim(),
+        variables: gqlVariables().trim() || undefined,
+        dataPath: gqlDataPath().trim() || undefined,
+        headers,
+        refreshInterval: ms / 1000,
+        displayMode: gqlDisplayMode(),
+      };
+    }
+
+    if (props.tile.type === 'reddit-keyword-monitor') {
+      updated.keywords = keywords().trim() || undefined;
     }
 
     props.onSave(updated);
@@ -129,11 +201,16 @@ export function TileConfigModal(props: Props): JSX.Element {
   const isRss  = () => props.tile.type === 'rss-feed';
   const isRest = () => props.tile.type === 'rest';
   const isWs   = () => props.tile.type === 'websocket';
+  const isCustomApi = () => props.tile.type === 'custom-api';
+  const isGraphql = () => props.tile.type === 'graphql';
+  const isKeywordMonitor = () => props.tile.type === 'reddit-keyword-monitor';
 
   const canSave = () => {
-    if (isRss())  return rssUrlValid();
-    if (isRest()) return restUrl().trim().length > 0;
-    if (isWs())   return wsUrl().trim().length > 0;
+    if (isRss())       return rssUrlValid();
+    if (isRest())      return restUrl().trim().length > 0;
+    if (isWs())        return wsUrl().trim().length > 0;
+    if (isCustomApi()) return caUrl().trim().length > 0;
+    if (isGraphql())   return gqlUrl().trim().length > 0 && gqlQuery().trim().length > 0;
     return true;
   };
 
@@ -249,6 +326,34 @@ export function TileConfigModal(props: Props): JSX.Element {
                 <option value="text">Text</option>
               </select>
             </label>
+            <label class="field">
+              <span class="field__label">Chart field (dot-path, optional)</span>
+              <input class="field__input" type="text"
+                placeholder="e.g. price or result.close"
+                value={restChartField()}
+                onInput={(e) => setRestChartField(e.currentTarget.value)} />
+              <span class="field__hint">Numeric field to visualise as a chart. Leave empty to disable.</span>
+            </label>
+            <Show when={restChartField().trim().length > 0}>
+              <fieldset class="field">
+                <legend class="field__label">Chart type</legend>
+                <label class="field__radio">
+                  <input type="radio" name="restChartType" value="line"
+                    checked={restChartType() === 'line'}
+                    onChange={() => setRestChartType('line')} /> Line
+                </label>
+                <label class="field__radio">
+                  <input type="radio" name="restChartType" value="bar"
+                    checked={restChartType() === 'bar'}
+                    onChange={() => setRestChartType('bar')} /> Bar
+                </label>
+                <label class="field__radio">
+                  <input type="radio" name="restChartType" value="candle"
+                    checked={restChartType() === 'candle'}
+                    onChange={() => setRestChartType('candle')} /> Candle
+                </label>
+              </fieldset>
+            </Show>
             <div class="field">
               <button
                 class="btn btn--neutral btn--sm"
@@ -295,6 +400,34 @@ export function TileConfigModal(props: Props): JSX.Element {
                 value={wsFieldLabels()}
                 onInput={(e) => setWsFieldLabels(e.currentTarget.value)} />
             </label>
+            <label class="field">
+              <span class="field__label">Chart field (dot-path, optional)</span>
+              <input class="field__input" type="text"
+                placeholder="e.g. p or payload.price"
+                value={wsChartField()}
+                onInput={(e) => setWsChartField(e.currentTarget.value)} />
+              <span class="field__hint">Numeric dot-path field to plot as a chart. Leave empty to disable.</span>
+            </label>
+            <Show when={wsChartField().trim().length > 0}>
+              <fieldset class="field">
+                <legend class="field__label">Chart type</legend>
+                <label class="field__radio">
+                  <input type="radio" name="wsChartType" value="line"
+                    checked={wsChartType() === 'line'}
+                    onChange={() => setWsChartType('line')} /> Line
+                </label>
+                <label class="field__radio">
+                  <input type="radio" name="wsChartType" value="bar"
+                    checked={wsChartType() === 'bar'}
+                    onChange={() => setWsChartType('bar')} /> Bar
+                </label>
+                <label class="field__radio">
+                  <input type="radio" name="wsChartType" value="candle"
+                    checked={wsChartType() === 'candle'}
+                    onChange={() => setWsChartType('candle')} /> Candle
+                </label>
+              </fieldset>
+            </Show>
             <div class="field">
               <button
                 class="btn btn--neutral btn--sm"
@@ -309,6 +442,141 @@ export function TileConfigModal(props: Props): JSX.Element {
                 <span class="test-connection-result test-connection-result--error">❌ {testMessage()}</span>
               </Show>
             </div>
+          </Show>
+
+          {/* Custom API-specific */}
+          <Show when={isCustomApi()}>
+            <label class="field">
+              <span class="field__label">Endpoint URL</span>
+              <input class="field__input" type="url"
+                placeholder="https://api.example.com/data"
+                value={caUrl()}
+                onInput={(e) => setCaUrl(e.currentTarget.value)} />
+            </label>
+            <label class="field">
+              <span class="field__label">HTTP method</span>
+              <select class="field__input"
+                value={caMethod()}
+                onChange={(e) => setCaMethod(e.currentTarget.value as 'GET'|'POST'|'PUT'|'PATCH'|'DELETE')}>
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field__label">Headers (JSON)</span>
+              <textarea class="field__input field__textarea"
+                placeholder='{"Authorization": "Bearer token", "X-Api-Key": "secret"}'
+                value={caHeaders()}
+                onInput={(e) => setCaHeaders(e.currentTarget.value)} />
+            </label>
+            <Show when={caMethod() !== 'GET' && caMethod() !== 'DELETE'}>
+              <label class="field">
+                <span class="field__label">Request body</span>
+                <textarea class="field__input field__textarea"
+                  placeholder='{"key": "value"}'
+                  value={caBody()}
+                  onInput={(e) => setCaBody(e.currentTarget.value)} />
+                <span class="field__hint">JSON body sent with POST / PUT / PATCH requests.</span>
+              </label>
+            </Show>
+            <label class="field">
+              <span class="field__label">Data path (optional)</span>
+              <input class="field__input" type="text"
+                placeholder="data.items"
+                value={caDataPath()}
+                onInput={(e) => setCaDataPath(e.currentTarget.value)} />
+              <span class="field__hint">Dot-path into the response, e.g. <code>items</code>. Pick and rename columns using <code>path as Label</code>: <code>items.name as Name, items.owner.login as Owner, items.html_url as URL</code>. Leave blank to use the full response.</span>
+            </label>
+            <label class="field">
+              <span class="field__label">Display mode</span>
+              <select class="field__input"
+                value={caDisplayMode()}
+                onChange={(e) => setCaDisplayMode(e.currentTarget.value as 'table'|'json'|'text'|'key-value')}>
+                <option value="table">Table (array of objects)</option>
+                <option value="key-value">Key-value pairs (object)</option>
+                <option value="json">JSON</option>
+                <option value="text">Text</option>
+              </select>
+            </label>
+          </Show>
+
+          {/* GraphQL-specific */}
+          <Show when={isGraphql()}>
+            <label class="field">
+              <span class="field__label">Endpoint URL</span>
+              <input class="field__input" type="url"
+                placeholder="https://api.example.com/graphql"
+                value={gqlUrl()}
+                onInput={(e) => { setGqlUrl(e.currentTarget.value); setTestStatus('idle'); }} />
+            </label>
+            <label class="field">
+              <span class="field__label">Query</span>
+              <textarea class="field__input graphql-tile__query"
+                placeholder="{ users { id name email } }"
+                value={gqlQuery()}
+                onInput={(e) => setGqlQuery(e.currentTarget.value)} />
+            </label>
+            <label class="field">
+              <span class="field__label">Variables (JSON, optional)</span>
+              <textarea class="field__input graphql-tile__query"
+                placeholder='{"limit": 10}'
+                value={gqlVariables()}
+                onInput={(e) => setGqlVariables(e.currentTarget.value)} />
+              <span class="field__hint">JSON object of GraphQL variables. Leave empty if the query takes none.</span>
+            </label>
+            <label class="field">
+              <span class="field__label">Data path (optional)</span>
+              <input class="field__input" type="text"
+                placeholder="data.users"
+                value={gqlDataPath()}
+                onInput={(e) => setGqlDataPath(e.currentTarget.value)} />
+              <span class="field__hint">Dot-path into the response to extract, e.g. <code>data.orders</code>. Leave blank to use the full response.</span>
+            </label>
+            <label class="field">
+              <span class="field__label">Headers (JSON, optional)</span>
+              <textarea class="field__input field__textarea"
+                placeholder='{"Authorization": "Bearer token"}'
+                value={gqlHeaders()}
+                onInput={(e) => setGqlHeaders(e.currentTarget.value)} />
+            </label>
+            <label class="field">
+              <span class="field__label">Display mode</span>
+              <select class="field__input"
+                value={gqlDisplayMode()}
+                onChange={(e) => setGqlDisplayMode(e.currentTarget.value as 'table'|'json'|'text')}>
+                <option value="json">JSON</option>
+                <option value="table">Table (array of objects)</option>
+                <option value="text">Text</option>
+              </select>
+            </label>
+            <div class="field">
+              <button
+                class="btn btn--neutral btn--sm"
+                disabled={gqlUrl().trim().length === 0 || testStatus() === 'loading'}
+                onClick={() => void testConnection('graphql')}>
+                {testStatus() === 'loading' ? 'Testing…' : 'Test connection'}
+              </button>
+              <Show when={testStatus() === 'ok'}>
+                <span class="test-connection-result test-connection-result--ok">✔️ {testMessage()}</span>
+              </Show>
+              <Show when={testStatus() === 'error'}>
+                <span class="test-connection-result test-connection-result--error">❌ {testMessage()}</span>
+              </Show>
+            </div>
+          </Show>
+
+          <Show when={isKeywordMonitor()}>
+            <label class="field">
+              <span class="field__label">Keywords</span>
+              <input class="field__input" type="text"
+                placeholder="rust, typescript, bun"
+                value={keywords()}
+                onInput={(e) => setKeywords(e.currentTarget.value)} />
+              <span class="field__hint">Comma-separated terms to filter and highlight matching posts. Leave blank to show all posts.</span>
+            </label>
           </Show>
 
           <div class="modal__actions">

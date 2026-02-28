@@ -3018,6 +3018,9 @@ const CHANNEL_ENV_MAP: Record<string, string[]> = {
   'shopify-products':                 ['SHOPIFY_SHOP', 'SHOPIFY_ACCESS_TOKEN'],
   // Social
   'reddit-posts':                     ['REDDIT_SUBREDDITS or REDDIT_KEYWORDS'],
+  // Note: reddit-hot-posts and reddit-keyword-monitor are UI aliases for
+  // reddit-posts via TILE_SSE_CHANNEL — they share the same poller and
+  // env-status lookup, so they do not need separate entries here.
   'producthunt-top-launches':         ['PRODUCTHUNT_API_TOKEN'],
 };
 
@@ -3330,13 +3333,75 @@ function startPollers(): void {
   broadcastSse('env-status', missingEnvMap);
 }
 
+// ── Generic API proxy (for Custom API tiles) ────────────────────────────────
+
+async function handleApiProxy(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const bodyText = await readBody(req);
+  let payload: { url: string; method?: string; headers?: Record<string, string>; body?: string };
+  try { payload = JSON.parse(bodyText) as typeof payload; }
+  catch { json(res, 400, { ok: false, error: 'Invalid JSON body' }); return; }
+
+  const { url, method = 'GET', headers = {}, body: reqBody } = payload;
+  if (!url || typeof url !== 'string') {
+    json(res, 400, { ok: false, error: '"url" is required' }); return;
+  }
+
+  const upper = method.toUpperCase();
+  const hasBody = !['GET', 'HEAD', 'DELETE'].includes(upper) && reqBody != null;
+
+  try {
+    const r = await fetch(url, {
+      method: upper,
+      headers: hasBody
+        ? { 'Content-Type': 'application/json', ...headers }
+        : headers,
+      body: hasBody ? reqBody : undefined,
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await r.text();
+    let data: unknown;
+    const ct = r.headers.get('content-type') ?? '';
+    if (ct.includes('json')) {
+      try { data = JSON.parse(text); } catch { data = text; }
+    } else {
+      data = text;
+    }
+    json(res, 200, { ok: r.ok, status: r.status, statusText: r.statusText, data });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    json(res, 200, { ok: false, error: msg });
+  }
+}
+
 // ── Test-connection handler ─────────────────────────────────────────────────
 
 async function handleTestConnection(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readBody(req);
-  let payload: { type: 'rest' | 'ws'; url: string; headers?: Record<string, string> };
+  let payload: { type: 'rest' | 'ws' | 'graphql'; url: string; query?: string; headers?: Record<string, string> };
   try { payload = JSON.parse(body) as typeof payload; }
   catch { json(res, 400, { ok: false, error: 'Invalid JSON body' }); return; }
+
+  if (payload.type === 'graphql') {
+    try {
+      const introspection = payload.query ?? '{__typename}';
+      const r = await fetch(payload.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(payload.headers ?? {}),
+        },
+        body: JSON.stringify({ query: introspection }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const text = await r.text().catch(() => '');
+      const preview = text.slice(0, 300);
+      json(res, 200, { ok: r.ok, status: r.status, statusText: r.statusText, preview });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      json(res, 200, { ok: false, error: msg });
+    }
+    return;
+  }
 
   if (payload.type === 'rest') {
     try {
@@ -3491,8 +3556,40 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
   }
+  if (pathname === '/api/proxy' && method === 'POST') {
+    await handleApiProxy(req, res); return;
+  }
   if (pathname === '/api/test-connection' && method === 'POST') {
     await handleTestConnection(req, res); return;
+  }
+
+  // ── Server control ────────────────────────────────────────────────────────
+  if (pathname === '/api/server/reload-env' && method === 'POST') {
+    try {
+      const content = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : '';
+      const vars = parseEnvFile(content);
+      const reloaded: string[] = [];
+      for (const [k, v] of Object.entries(vars)) {
+        if (process.env[k] !== v) {
+          process.env[k] = v;
+          reloaded.push(k);
+        }
+      }
+      console.log(`  [env]  reload-env  ${reloaded.length} keys updated: ${reloaded.join(', ') || '(none)'}`);
+      json(res, 200, { ok: true, reloaded });
+    } catch (e: unknown) {
+      json(res, 500, { ok: false, error: e instanceof Error ? e.message : 'Failed to reload .env' });
+    }
+    return;
+  }
+  if (pathname === '/api/server/restart' && method === 'POST') {
+    console.log('  [server] restarting on user request');
+    json(res, 200, { ok: true });
+    // Under bun --watch / PM2 / nodemon the supervisor respawns on exit.
+    // Do NOT spawn a child — that causes port conflicts when the supervisor
+    // also restarts at the same time.
+    setTimeout(() => process.exit(0), 200);
+    return;
   }
 
   // ── Env file read / write ──────────────────────────────────────────────────
@@ -3523,6 +3620,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           : '';
         const patched = patchEnvFile(existing, payload.vars);
         writeFileSync(ENV_PATH, patched, 'utf8');
+        console.log(`  [env]  wrote ${Object.keys(payload.vars).length} vars → ${ENV_PATH}`);
         json(res, 200, { ok: true });
       } catch (e: unknown) {
         json(res, 500, { error: e instanceof Error ? e.message : 'Failed to write .env' });

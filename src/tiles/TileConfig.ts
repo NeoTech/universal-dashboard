@@ -150,7 +150,9 @@ export type TileType =
   // ── Generic ───────────────────────────────────────────────────────────────
   | 'rss-feed'
   | 'rest'
-  | 'websocket';
+  | 'websocket'
+  | 'custom-api'
+  | 'graphql';
 
 export interface RssTileConfig {
   url: string;
@@ -159,6 +161,32 @@ export interface RssTileConfig {
 
 export interface RestTileConfig {
   url: string;
+  headers?: Record<string, string>;
+  refreshInterval?: number;
+  displayMode?: 'table' | 'json' | 'text';
+  /** Dot-path field to extract numeric values for chart visualisation, e.g. "price" */
+  chartField?: string;
+  chartType?: 'line' | 'bar' | 'candle';
+}
+
+export interface CustomApiTileConfig {
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  headers?: Record<string, string>;
+  body?: string;
+  displayMode?: 'table' | 'json' | 'text' | 'key-value';
+  /** Dot-path into the response to extract, e.g. "data.users" */
+  dataPath?: string;
+  refreshInterval?: number;
+}
+
+export interface GraphqlTileConfig {
+  url: string;
+  query: string;
+  /** JSON string of GraphQL variables, e.g. `{"id": 42}` */
+  variables?: string;
+  /** Dot-path into the response to extract, e.g. "data.users" */
+  dataPath?: string;
   headers?: Record<string, string>;
   refreshInterval?: number;
   displayMode?: 'table' | 'json' | 'text';
@@ -178,6 +206,9 @@ export interface WsTileConfig {
    * Falls back to the raw path name when omitted.
    */
   fieldLabels?: string;
+  /** Dot-path field to extract numeric values for chart visualisation, e.g. "p" */
+  chartField?: string;
+  chartType?: 'line' | 'bar' | 'candle';
 }
 
 export interface TileConfig {
@@ -225,6 +256,16 @@ export interface TileConfig {
   rest?: RestTileConfig;
   /** WebSocket source config (type === 'websocket') */
   ws?: WsTileConfig;
+  /** Custom API config (type === 'custom-api') */
+  customApi?: CustomApiTileConfig;
+  /** GraphQL config (type === 'graphql') */
+  graphql?: GraphqlTileConfig;
+  /**
+   * Comma-separated keywords used by the reddit-keyword-monitor tile to
+   * filter and highlight matching posts. Falls back to a prompt to configure
+   * when empty.
+   */
+  keywords?: string;
 }
 
 export const TILE_DEFAULTS: Record<TileType, Partial<TileConfig>> = {
@@ -380,6 +421,8 @@ export const TILE_DEFAULTS: Record<TileType, Partial<TileConfig>> = {
   'rss-feed':                  { w: 480, h: 360, title: 'RSS Feed' },
   'rest':                      { w: 400, h: 300, title: 'REST Source' },
   'websocket':                 { w: 400, h: 300, title: 'WebSocket Stream' },
+  'custom-api':                { w: 480, h: 320, title: 'Custom API' },
+  'graphql':                   { w: 480, h: 360, title: 'GraphQL' },
 };
 
 /**
@@ -530,11 +573,14 @@ export function snap(v: number, grid = 16): number {
  * All other tile types use their own type string as the channel name.
  */
 export const TILE_SSE_CHANNEL: Partial<Record<TileType, string>> = {
-  'github-actions':       'github-runs',
-  'cloudflare-pages':     'cf-pages',
-  'cloudflare-functions': 'cf-workers',
-  'stripe-orders':        'stripe-payments',
-  'coingecko-prices':     'coingecko-markets',
+  'github-actions':          'github-runs',
+  'cloudflare-pages':        'cf-pages',
+  'cloudflare-functions':    'cf-workers',
+  'stripe-orders':           'stripe-payments',
+  'coingecko-prices':        'coingecko-markets',
+  // Both UI-facing Reddit tile types share the same 'reddit-posts' SSE feed.
+  'reddit-hot-posts':        'reddit-posts',
+  'reddit-keyword-monitor':  'reddit-posts',
 };
 
 /** Create a new TileConfig with sensible defaults */

@@ -190,7 +190,10 @@ export function DashboardPanel(props: Props): JSX.Element {
   function handleCopyTile(sourceId: string, x: number, y: number): void {
     const source = tiles().find((t) => t.id === sourceId);
     if (!source) return;
-    const copy: TileConfig = { ...source, id: crypto.randomUUID(), x, y };
+    // structuredClone ensures nested config objects (ws, rest, etc.) are not
+    // shared by reference with the original tile — a shallow spread would cause
+    // both tiles to mutate the same nested object when either is configured.
+    const copy: TileConfig = { ...structuredClone(source), id: crypto.randomUUID(), x, y };
     const updated = [...tiles(), copy];
     setTiles(updated);
     persistLayout(updated);

@@ -10,11 +10,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+auth.db
 
 node_modules
 dist
 dist-ssr
 *.local
+
+.github/tasks/lessons.md
+.github/copilot-instructions.md
+.github/tasks/todo.md
 
 # Editor directories and files
 .vscode/*

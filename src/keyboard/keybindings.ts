@@ -37,10 +37,14 @@ export function matchesEvent(
   isMac: boolean,
 ): boolean {
   const modPressed = isMac ? event.metaKey : event.ctrlKey;
+  // For symbol characters (e.g. '?' = Shift+/) the shift state is already
+  // encoded in event.key itself, so we skip the shiftKey check. We only
+  // enforce shiftKey matching for letters/digits where shift changes meaning.
+  const isSymbol = binding.key.length === 1 && /[^a-z0-9]/i.test(binding.key);
   return (
     event.key.toLowerCase() === binding.key &&
     modPressed === binding.mod &&
-    event.shiftKey === binding.shift &&
+    (isSymbol || event.shiftKey === binding.shift) &&
     event.altKey === binding.alt
   );
 }

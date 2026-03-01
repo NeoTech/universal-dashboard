@@ -5,9 +5,11 @@ import { BaseTile } from '../BaseTile';
 import { useTileRefresh } from '../TileRefreshContext';
 import { sseReceivedAt, setSseRevision } from '../../ui/useSseChannel';
 import { usePagination, PaginationBar } from '../usePagination';
+import { API_BASE_URL } from '../../data/api';
 
 interface Props {
   config: GraphqlTileConfig;
+  tileId?: string;
 }
 
 type DisplayMode = 'table' | 'json' | 'text';
@@ -73,6 +75,14 @@ export function GraphqlTile(props: Props): JSX.Element {
       setData(extracted ?? json);
       sseReceivedAt.set('graphql', Date.now());
       setSseRevision(r => r + 1);
+      if (props.tileId) {
+        const jwt = typeof localStorage !== 'undefined' ? localStorage.getItem('twm-jwt') : null;
+        void fetch(`${API_BASE_URL}/api/tiles/${props.tileId}/data`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
+          body: JSON.stringify({ data: extracted ?? json }),
+        }).catch(() => { /* fire-and-forget */ });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch');
     } finally {

@@ -6,9 +6,11 @@ import { useTileRefresh } from '../TileRefreshContext';
 import { sseReceivedAt, setSseRevision } from '../../ui/useSseChannel';
 import { usePagination, PaginationBar } from '../usePagination';
 import { MiniChart } from '../../ui/MiniChart';
+import { API_BASE_URL } from '../../data/api';
 
 interface Props {
   config: RestTileConfig;
+  tileId?: string;
 }
 
 type DisplayMode = 'table' | 'json' | 'text';
@@ -57,6 +59,14 @@ export function RestTile(props: Props): JSX.Element {
       setData(result);
       sseReceivedAt.set('rest', Date.now());
       setSseRevision(r => r + 1);
+      if (props.tileId) {
+        const jwt = typeof localStorage !== 'undefined' ? localStorage.getItem('twm-jwt') : null;
+        void fetch(`${API_BASE_URL}/api/tiles/${props.tileId}/data`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
+          body: JSON.stringify({ data: result }),
+        }).catch(() => { /* fire-and-forget */ });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch');
     } finally {

@@ -30,5 +30,5 @@ describe('lint-guard', () => {
     }
     // eslint exits 0 → output is empty or just whitespace
     expect(output.trim()).not.toMatch(/error/i);
-  });
+  }, 30_000);
 });

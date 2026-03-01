@@ -13,8 +13,45 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHmac, randomBytes, pbkdf2Sync } from 'node:crypto';
 import { Database } from 'bun:sqlite';
-import Stripe from 'stripe';
 import { buildAuthnRequest, deflateEncode, buildSpMetadata, verifySamlResponse, parseIdpMetadata } from './saml.ts';
+import { readLayout, writeLayout } from './mcp-layout.ts';
+import type { ProviderRouteHandler, ServerContext } from './providers/types.ts';
+import { register as registerStripe, getStripe } from './providers/stripe.ts';
+import { register as registerGithub } from './providers/github.ts';
+import { register as registerCloudflare } from './providers/cloudflare.ts';
+import { register as registerPaypal } from './providers/paypal.ts';
+import { register as registerVercel } from './providers/vercel.ts';
+import { register as registerNetlify } from './providers/netlify.ts';
+import { register as registerCircleci } from './providers/circleci.ts';
+import { register as registerTravisci } from './providers/travisci.ts';
+import { register as registerBitrise } from './providers/bitrise.ts';
+import { register as registerSonarqube } from './providers/sonarqube.ts';
+import { register as registerAzuredevops } from './providers/azuredevops.ts';
+import { register as registerDockerhub } from './providers/dockerhub.ts';
+import { register as registerNpm } from './providers/npm.ts';
+import { register as registerJsdelivr } from './providers/jsdelivr.ts';
+import { register as registerWakatime } from './providers/wakatime.ts';
+import { register as registerClockify } from './providers/clockify.ts';
+import { register as registerLinear } from './providers/linear.ts';
+import { register as registerJira } from './providers/jira.ts';
+import { register as registerSlack } from './providers/slack.ts';
+import { register as registerDiscord } from './providers/discord.ts';
+import { register as registerMailchimp } from './providers/mailchimp.ts';
+import { register as registerGa4 } from './providers/ga4.ts';
+import { register as registerInstatus } from './providers/instatus.ts';
+import { register as registerHackernews } from './providers/hackernews.ts';
+import { register as registerRss } from './providers/rss.ts';
+import { register as registerAlphavantage } from './providers/alphavantage.ts';
+import { register as registerCoingecko } from './providers/coingecko.ts';
+import { register as registerFinnhub } from './providers/finnhub.ts';
+import { register as registerPlaid } from './providers/plaid.ts';
+import { register as registerHibp } from './providers/hibp.ts';
+import { register as registerVirustotal } from './providers/virustotal.ts';
+import { register as registerShodan } from './providers/shodan.ts';
+import { register as registerWoocommerce } from './providers/woocommerce.ts';
+import { register as registerShopify } from './providers/shopify.ts';
+import { register as registerReddit } from './providers/reddit.ts';
+import { register as registerProducthunt } from './providers/producthunt.ts';
 
 // ── Order workflow status store (SQLite via bun:sqlite) ───────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,24 +119,6 @@ function patchEnvFile(existing: string, updates: Record<string, string>): string
 }
 
 
-type OrderWorkflowStatus = 'new' | 'processing' | 'packing' | 'shipped' | 'done';
-interface OrderStatusEntry { status: OrderWorkflowStatus; updatedAt: number; note?: string }
-
-const db = new Database(join(__dirname, 'order-statuses.db'), { create: true });
-db.run(`CREATE TABLE IF NOT EXISTS order_statuses (
-  id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  updated_at INTEGER NOT NULL,
-  note TEXT
-)`);
-
-const stmtGet  = db.prepare<{ id: string; status: string; updated_at: number; note: string | null }, []>(
-  'SELECT id, status, updated_at, note FROM order_statuses'
-);
-const stmtUpsert = db.prepare<void, [string, string, number, string | null]>(
-  'INSERT INTO order_statuses (id, status, updated_at, note) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at, note=excluded.note'
-);
-
 // ── Auth database ──────────────────────────────────────────────────────────────
 const authDb = new Database(AUTH_DB_PATH, { create: true });
 authDb.run(`CREATE TABLE IF NOT EXISTS users (
@@ -125,6 +144,14 @@ const JWT_SECRET: string = process.env['JWT_SECRET'] ?? (() => {
 
 /** Whether login is required. Set AUTH_ENABLED=true in .env to enable. */
 const AUTH_ENABLED: boolean = process.env['AUTH_ENABLED'] === 'true';
+
+/** Whether the MCP server endpoint is active. Set MCP_ENABLED=true in .env. */
+const MCP_ENABLED: boolean = process.env['MCP_ENABLED'] === 'true';
+/** Whether MCP tools require a valid JWT. Defaults to AUTH_ENABLED when unset. */
+const MCP_AUTH_REQUIRED: boolean =
+  process.env['MCP_AUTH_REQUIRED'] !== undefined
+    ? process.env['MCP_AUTH_REQUIRED'] === 'true'
+    : AUTH_ENABLED;
 
 // ── SAML SSO config ────────────────────────────────────────────────────────────
 /** Authentication provider: 'local' (default) or 'saml' for SAML 2.0 SSO. */
@@ -198,6 +225,9 @@ function verifyJwt(token: string): JwtPayload | null {
 function extractToken(req: IncomingMessage): JwtPayload | null {
   const auth = req.headers.authorization ?? '';
   if (auth.startsWith('Bearer ')) return verifyJwt(auth.slice(7));
+  // Plain Token header — simpler for MCP / agent clients
+  const tokenHeader = req.headers['token'];
+  if (tokenHeader && typeof tokenHeader === 'string') return verifyJwt(tokenHeader);
   // EventSource cannot set headers — accept token as query param for SSE
   const qs = new URL(req.url ?? '/', 'http://localhost').searchParams;
   const t = qs.get('token');
@@ -225,19 +255,6 @@ const stmtInsertUser  = authDb.prepare<{ id: number }, [string, string]>('INSERT
 const stmtGetLayout   = authDb.prepare<{ tiles_json: string }, [number, string]>('SELECT tiles_json FROM tile_layouts WHERE user_id = ? AND workspace = ?');
 const stmtUpsertLayout = authDb.prepare<void, [number, string, string, number]>('INSERT INTO tile_layouts (user_id, workspace, tiles_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, workspace) DO UPDATE SET tiles_json=excluded.tiles_json, updated_at=excluded.updated_at');
 
-function readStatuses(): Record<string, OrderStatusEntry> {
-  const rows = stmtGet.all();
-  const out: Record<string, OrderStatusEntry> = {};
-  for (const r of rows) {
-    out[r.id] = { status: r.status as OrderWorkflowStatus, updatedAt: r.updated_at, ...(r.note ? { note: r.note } : {}) };
-  }
-  return out;
-}
-
-function writeStatus(id: string, entry: OrderStatusEntry): void {
-  stmtUpsert.run(id, entry.status, entry.updatedAt, entry.note ?? null);
-}
-
 // ── Provider base-URL overrides (for local mocks / enterprise endpoints) ──────
 const STRIPE_API_URL     = process.env['STRIPE_API_URL']     ?? 'https://api.stripe.com';
 const GITHUB_API_URL     = process.env['GITHUB_API_URL']     ?? 'https://api.github.com';
@@ -245,25 +262,11 @@ const CLOUDFLARE_API_URL = process.env['CLOUDFLARE_API_URL'] ?? 'https://api.clo
 const PAYPAL_API_URL     = process.env['PAYPAL_API_URL']     ?? '';   // empty = use PAYPAL_ENV logic
 const BACKEND_BASE_URL   = process.env['BACKEND_BASE_URL']   ?? '';   // prepended when proxy url is relative
 
-// ── Stripe client (lazy) ──────────────────────────────────────────────────────
-function getStripe(): Stripe | null {
-  const key = process.env['STRIPE_SECRET_KEY'];
-  if (!key || key.startsWith('sk_test_your')) return null;
-  const cfg: Stripe.StripeConfig = { apiVersion: '2025-01-27.acacia' };
-  if (STRIPE_API_URL !== 'https://api.stripe.com') {
-    const u = new URL(STRIPE_API_URL);
-    cfg.host     = u.hostname;
-    cfg.protocol = (u.protocol === 'https:' ? 'https' : 'http') as 'https' | 'http';
-    if (u.port) cfg.port = parseInt(u.port, 10);
-  }
-  return new Stripe(key, cfg);
-}
-
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
 function json(res: ServerResponse, status: number, data: unknown): void {
@@ -279,330 +282,20 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function noStripe(res: ServerResponse): void {
-  json(res, 503, { error: 'Stripe not configured. Add STRIPE_SECRET_KEY to .env' });
-}
-
-// ── Route: GET /api/stripe/payments ──────────────────────────────────────────
-async function getPayments(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const charges = await stripe.charges.list({ limit: 50 });
-  json(res, 200, charges.data.map((c) => ({
-    id: c.id, amount: c.amount, currency: c.currency, status: c.status,
-    description: c.description, customer: c.customer, created: c.created,
-    receiptEmail: c.receipt_email,
-  })));
-}
-
-// ── Route: GET /api/stripe/payments/:id ──────────────────────────────────────
-async function getPayment(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const c = await stripe.charges.retrieve(id, { expand: ['customer', 'payment_intent'] });
-  json(res, 200, {
-    id: c.id, amount: c.amount, currency: c.currency, status: c.status,
-    description: c.description, customer: c.customer, created: c.created,
-    receiptEmail: c.receipt_email, receiptUrl: c.receipt_url,
-    refunded: c.refunded, amountRefunded: c.amount_refunded,
-    captured: c.captured, disputed: c.disputed,
-    failureCode: c.failure_code, failureMessage: c.failure_message,
-    paymentIntent: typeof c.payment_intent === 'string' ? c.payment_intent : c.payment_intent?.id,
-    billingDetails: c.billing_details,
-    outcome: c.outcome,
-  });
-}
-
-// ── Route: POST /api/stripe/payments/:id/refund ───────────────────────────────
-async function refundPayment(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as { amount?: number; reason?: string };
-  const refund = await stripe.refunds.create({
-    charge: id,
-    ...(params.amount ? { amount: params.amount } : {}),
-    ...(params.reason ? { reason: params.reason as Stripe.RefundCreateParams['reason'] } : {}),
-  });
-  json(res, 200, { id: refund.id, amount: refund.amount, status: refund.status, reason: refund.reason });
-}
-
-// ── Route: POST /api/stripe/payments/:id/capture ──────────────────────────────
-async function capturePayment(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  // id here could be a charge or a payment_intent — try PaymentIntent first
-  try {
-    const pi = await stripe.paymentIntents.capture(id);
-    json(res, 200, { id: pi.id, status: pi.status });
-  } catch {
-    const c = await stripe.charges.capture(id);
-    json(res, 200, { id: c.id, status: c.status });
-  }
-}
-
-// ── Route: POST /api/stripe/payments/:id/cancel ───────────────────────────────
-async function cancelPayment(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const pi = await stripe.paymentIntents.cancel(id);
-  json(res, 200, { id: pi.id, status: pi.status });
-}
-
-// ── Route: GET /api/stripe/products ──────────────────────────────────────────
-async function getProducts(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const [products, prices] = await Promise.all([
-    stripe.products.list({ limit: 50 }),
-    stripe.prices.list({ limit: 100, active: true }),
-  ]);
-  const priceMap = new Map(prices.data.map((p) => [p.product as string, p]));
-  json(res, 200, products.data.map((p) => ({
-    id: p.id, name: p.name, description: p.description, active: p.active,
-    images: p.images, created: p.created, updated: p.updated,
-    price: priceMap.get(p.id)
-      ? { amount: priceMap.get(p.id)!.unit_amount, currency: priceMap.get(p.id)!.currency, interval: priceMap.get(p.id)!.recurring?.interval }
-      : null,
-  })));
-}
-
-// ── Route: GET /api/stripe/products/:id ──────────────────────────────────────
-async function getProduct(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const p = await stripe.products.retrieve(id);
-  json(res, 200, {
-    id: p.id, name: p.name, description: p.description, active: p.active,
-    images: p.images, created: p.created, updated: p.updated, metadata: p.metadata,
-  });
-}
-
-// ── Route: PATCH /api/stripe/products/:id ────────────────────────────────────
-async function updateProduct(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.ProductUpdateParams;
-  const p = await stripe.products.update(id, params);
-  json(res, 200, { id: p.id, name: p.name, description: p.description, active: p.active });
-}
-
-// ── Route: POST /api/stripe/products ─────────────────────────────────────────
-async function createProduct(stripe: Stripe, res: ServerResponse, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.ProductCreateParams;
-  const p = await stripe.products.create(params);
-  json(res, 200, { id: p.id, name: p.name, description: p.description, active: p.active });
-}
-
-// ── Route: DELETE /api/stripe/products/:id ───────────────────────────────────
-async function deleteProduct(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const result = await stripe.products.del(id);
-  json(res, 200, { id: result.id, deleted: result.deleted });
-}
-
-// ── Route: GET /api/stripe/products/:id/prices ───────────────────────────────
-async function getProductPrices(stripe: Stripe, res: ServerResponse, productId: string): Promise<void> {
-  const prices = await stripe.prices.list({ product: productId, limit: 20 });
-  json(res, 200, prices.data.map((p) => ({
-    id: p.id, active: p.active, currency: p.currency,
-    unitAmount: p.unit_amount, nickname: p.nickname,
-    recurring: p.recurring ? { interval: p.recurring.interval, intervalCount: p.recurring.interval_count } : null,
-    type: p.type, created: p.created,
-  })));
-}
-
-// ── Route: POST /api/stripe/prices ───────────────────────────────────────────
-async function createPrice(stripe: Stripe, res: ServerResponse, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.PriceCreateParams;
-  const p = await stripe.prices.create(params);
-  json(res, 200, { id: p.id, active: p.active, currency: p.currency, unitAmount: p.unit_amount, type: p.type });
-}
-
-// ── Route: PATCH /api/stripe/prices/:id ──────────────────────────────────────
-async function updatePrice(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.PriceUpdateParams;
-  const p = await stripe.prices.update(id, params);
-  json(res, 200, { id: p.id, active: p.active, nickname: p.nickname });
-}
-
-// ── Route: GET /api/stripe/subscriptions ─────────────────────────────────────
-async function getSubscriptions(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const subs = await stripe.subscriptions.list({ limit: 50 });
-  json(res, 200, subs.data.map((s) => ({
-    id: s.id, status: s.status, customer: s.customer,
-    currentPeriodEnd: s.current_period_end, cancelAtPeriodEnd: s.cancel_at_period_end,
-    items: s.items.data.map((i) => ({ priceId: i.price.id, quantity: i.quantity })),
-    created: s.created,
-  })));
-}
-
-// ── Route: GET /api/stripe/subscriptions/:id ─────────────────────────────────
-async function getSubscription(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const s = await stripe.subscriptions.retrieve(id, { expand: ['latest_invoice', 'customer', 'default_payment_method'] });
-  json(res, 200, {
-    id: s.id, status: s.status, customer: s.customer,
-    currentPeriodStart: s.current_period_start, currentPeriodEnd: s.current_period_end,
-    cancelAtPeriodEnd: s.cancel_at_period_end, cancelAt: s.cancel_at, canceledAt: s.canceled_at,
-    trialStart: s.trial_start, trialEnd: s.trial_end,
-    items: s.items.data.map((i) => ({ id: i.id, priceId: i.price.id, quantity: i.quantity, priceNickname: i.price.nickname, unitAmount: i.price.unit_amount, currency: i.price.currency, interval: i.price.recurring?.interval })),
-    created: s.created, description: s.description,
-    latestInvoice: typeof s.latest_invoice === 'string' ? s.latest_invoice : s.latest_invoice?.id,
-    metadata: s.metadata,
-  });
-}
-
-// ── Route: PATCH /api/stripe/subscriptions/:id ───────────────────────────────
-async function updateSubscription(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.SubscriptionUpdateParams;
-  const s = await stripe.subscriptions.update(id, params);
-  json(res, 200, { id: s.id, status: s.status, cancelAtPeriodEnd: s.cancel_at_period_end });
-}
-
-// ── Route: DELETE /api/stripe/subscriptions/:id ──────────────────────────────
-async function cancelSubscription(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as { invoice_now?: boolean; prorate?: boolean };
-  const s = await stripe.subscriptions.cancel(id, params);
-  json(res, 200, { id: s.id, status: s.status, canceledAt: s.canceled_at });
-}
-
-// ── Route: POST /api/stripe/subscriptions/:id/resume ─────────────────────────
-async function resumeSubscription(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const s = await stripe.subscriptions.resume(id, { billing_cycle_anchor: 'now' });
-  json(res, 200, { id: s.id, status: s.status });
-}
-
-// ── Route: GET /api/stripe/customers ─────────────────────────────────────────
-async function getCustomers(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const customers = await stripe.customers.list({ limit: 50 });
-  const now = Math.floor(Date.now() / 1000);
-  const thirtyDaysAgo = now - 30 * 86400;
-  json(res, 200, {
-    total: customers.data.length,
-    newThisMonth: customers.data.filter((c) => c.created > thirtyDaysAgo).length,
-    list: customers.data.map((c) => ({
-      id: c.id, email: c.email, name: c.name, created: c.created, currency: c.currency,
-    })),
-  });
-}
-
-// ── Route: GET /api/stripe/customers/list ────────────────────────────────────
-async function getCustomerList(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const customers = await stripe.customers.list({ limit: 100 });
-  json(res, 200, customers.data.map((c) => ({
-    id: c.id, email: c.email, name: c.name, created: c.created, currency: c.currency,
-    balance: c.balance, delinquent: c.delinquent, description: c.description,
-  })));
-}
-
-// ── Route: GET /api/stripe/customers/:id ─────────────────────────────────────
-async function getCustomer(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const c = await stripe.customers.retrieve(id) as Stripe.Customer;
-  json(res, 200, {
-    id: c.id, email: c.email, name: c.name, phone: c.phone, created: c.created,
-    currency: c.currency, balance: c.balance, delinquent: c.delinquent,
-    description: c.description, metadata: c.metadata,
-    address: c.address,
-  });
-}
-
-// ── Route: PATCH /api/stripe/customers/:id ───────────────────────────────────
-async function updateCustomer(stripe: Stripe, res: ServerResponse, id: string, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as Stripe.CustomerUpdateParams;
-  const c = await stripe.customers.update(id, params);
-  json(res, 200, { id: c.id, email: c.email, name: c.name, description: c.description });
-}
-
-// ── Route: DELETE /api/stripe/customers/:id ──────────────────────────────────
-async function deleteCustomer(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const result = await stripe.customers.del(id);
-  json(res, 200, { id: result.id, deleted: result.deleted });
-}
-
-// ── Route: GET /api/stripe/invoices ──────────────────────────────────────────
-async function getInvoices(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const invoices = await stripe.invoices.list({ limit: 50 });
-  json(res, 200, invoices.data.map((inv) => ({
-    id: inv.id, status: inv.status, customer: inv.customer, subscription: inv.subscription,
-    amountDue: inv.amount_due, amountPaid: inv.amount_paid, total: inv.total,
-    currency: inv.currency, created: inv.created, dueDate: inv.due_date,
-    hostedInvoiceUrl: inv.hosted_invoice_url, invoicePdf: inv.invoice_pdf,
-    number: inv.number, attemptCount: inv.attempt_count,
-  })));
-}
-
-// ── Route: GET /api/stripe/invoices/:id ──────────────────────────────────────
-async function getInvoice(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const inv = await stripe.invoices.retrieve(id, { expand: ['customer'] });
-  json(res, 200, {
-    id: inv.id, status: inv.status, customer: inv.customer, subscription: inv.subscription,
-    amountDue: inv.amount_due, amountPaid: inv.amount_paid, amountRemaining: inv.amount_remaining,
-    total: inv.total, subtotal: inv.subtotal, currency: inv.currency,
-    created: inv.created, dueDate: inv.due_date, periodStart: inv.period_start, periodEnd: inv.period_end,
-    hostedInvoiceUrl: inv.hosted_invoice_url, invoicePdf: inv.invoice_pdf,
-    number: inv.number, attemptCount: inv.attempt_count, nextPaymentAttempt: inv.next_payment_attempt,
-    lines: inv.lines.data.map((l) => ({
-      id: l.id, description: l.description, amount: l.amount, currency: l.currency,
-      quantity: l.quantity, period: l.period,
-    })),
-    metadata: inv.metadata,
-  });
-}
-
-// ── Route: POST /api/stripe/invoices/:id/finalize ────────────────────────────
-async function finalizeInvoice(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const inv = await stripe.invoices.finalizeInvoice(id);
-  json(res, 200, { id: inv.id, status: inv.status, hostedInvoiceUrl: inv.hosted_invoice_url });
-}
-
-// ── Route: POST /api/stripe/invoices/:id/pay ─────────────────────────────────
-async function payInvoice(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const inv = await stripe.invoices.pay(id);
-  json(res, 200, { id: inv.id, status: inv.status });
-}
-
-// ── Route: POST /api/stripe/invoices/:id/void ────────────────────────────────
-async function voidInvoice(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const inv = await stripe.invoices.voidInvoice(id);
-  json(res, 200, { id: inv.id, status: inv.status });
-}
-
-// ── Route: POST /api/stripe/invoices/:id/send ────────────────────────────────
-async function sendInvoice(stripe: Stripe, res: ServerResponse, id: string): Promise<void> {
-  const inv = await stripe.invoices.sendInvoice(id);
-  json(res, 200, { id: inv.id, status: inv.status });
-}
-
-// ── Route: GET /api/stripe/refunds ───────────────────────────────────────────
-async function getRefunds(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const refunds = await stripe.refunds.list({ limit: 50 });
-  json(res, 200, refunds.data.map((r) => ({
-    id: r.id, amount: r.amount, currency: r.currency, status: r.status,
-    reason: r.reason, charge: r.charge, paymentIntent: r.payment_intent,
-    created: r.created, description: r.description,
-  })));
-}
-
-// ── Route: POST /api/stripe/refunds ──────────────────────────────────────────
-async function createRefund(stripe: Stripe, res: ServerResponse, body: string): Promise<void> {
-  const params = JSON.parse(body || '{}') as { charge?: string; payment_intent?: string; amount?: number; reason?: string };
-  const refund = await stripe.refunds.create({
-    ...(params.charge ? { charge: params.charge } : {}),
-    ...(params.payment_intent ? { payment_intent: params.payment_intent } : {}),
-    ...(params.amount ? { amount: params.amount } : {}),
-    ...(params.reason ? { reason: params.reason as Stripe.RefundCreateParams['reason'] } : {}),
-  });
-  json(res, 200, { id: refund.id, amount: refund.amount, currency: refund.currency, status: refund.status, reason: refund.reason });
-}
-
-// ── Legacy list handlers (kept for existing tiles) ───────────────────────────
-async function getWebhookEvents(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const events = await stripe.events.list({ limit: 25 });
-  json(res, 200, events.data.map((e) => ({
-    id: e.id, type: e.type, created: e.created, livemode: e.livemode, apiVersion: e.api_version,
-  })));
-}
-
-async function getRevenue(stripe: Stripe, res: ServerResponse): Promise<void> {
-  const from = Math.floor(Date.now() / 1000) - 30 * 86400;
-  const charges = await stripe.charges.list({ limit: 100, created: { gte: from } });
-  const buckets: Record<string, number> = {};
-  for (const c of charges.data) {
-    if (c.status !== 'succeeded') continue;
-    const day = new Date(c.created * 1000).toISOString().slice(0, 10);
-    buckets[day] = (buckets[day] ?? 0) + c.amount;
-  }
-  json(res, 200, Object.entries(buckets).sort(([a], [b]) => a.localeCompare(b)).map(([date, amount]) => ({ date, amount })));
-}
-
-// ── Webhook SSE ───────────────────────────────────────────────────────────────
-const webhookClients = new Set<ServerResponse>();
-
 // ── Shared SSE broadcast infrastructure ──────────────────────────────────────
 const sseClients = new Set<ServerResponse>();
 const resourceCache = new Map<string, unknown>();
+
+/**
+ * Server-side shadow of the dashboard tile layout, kept in sync by the MCP
+ * add_tile / remove_tile / update_tile tools. Initialised from the DB on the
+ * first authenticated add_tile call. Used by list_tiles so it always has an
+ * accurate view regardless of whether the MCP client passes a JWT.
+ */
+let mcpLayout: Record<string, unknown>[] = [];
+
+/** Route handlers registered by provider modules — populated by startPollers(). */
+const providerHandlers: ProviderRouteHandler[] = [];
 
 /**
  * Registry of on-demand refresh functions keyed by SSE event name.
@@ -692,6 +385,18 @@ function broadcastSse(event: string, data: unknown): void {
   }
 }
 
+/**
+ * Broadcast an SSE event without caching it in resourceCache.
+ * Use this for ephemeral commands (e.g. tile-op) that must not be replayed
+ * to clients that connect after the event has already been applied.
+ */
+function broadcastSseEphemeral(event: string, data: unknown): void {
+  const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of [...sseClients]) {
+    try { client.write(chunk); } catch { sseClients.delete(client); }
+  }
+}
+
 function handleSseStream(req: IncomingMessage, res: ServerResponse): void {
   const clientIp = req.socket.remoteAddress ?? 'unknown';
   console.log(`  [sse]  client connected   ip=${clientIp}  total=${sseClients.size + 1}`);
@@ -714,2267 +419,6 @@ function handleSseStream(req: IncomingMessage, res: ServerResponse): void {
     sseClients.delete(res);
     console.log(`  [sse]  client disconnected ip=${clientIp}  total=${sseClients.size}`);
   });
-}
-
-function handleWebhookStream(req: IncomingMessage, res: ServerResponse): void {
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', ...CORS });
-  res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
-  webhookClients.add(res);
-  req.on('close', () => webhookClients.delete(res));
-}
-
-async function handleWebhookIngest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await readBody(req);
-  const secret = process.env['STRIPE_WEBHOOK_SECRET'];
-  const sig = req.headers['stripe-signature'] as string | undefined;
-  let event: Stripe.Event;
-  try {
-    const stripe = getStripe();
-    if (stripe && secret && sig) {
-      event = stripe.webhooks.constructEvent(body, sig, secret);
-    } else {
-      event = JSON.parse(body) as Stripe.Event;
-    }
-  } catch {
-    json(res, 400, { error: 'Invalid webhook payload' });
-    return;
-  }
-  const payload = JSON.stringify({ type: 'stripe-event', event });
-  for (const client of webhookClients) client.write(`data: ${payload}\n\n`);
-  json(res, 200, { received: true });
-}
-
-// ── GitHub Actions handlers ───────────────────────────────────────────────────
-
-interface GHApiRun {
-  id: number; name: string; head_branch: string; head_sha: string;
-  run_number: number; event: string; status: string; conclusion: string | null;
-  html_url: string; created_at: string; updated_at: string; display_title?: string;
-  repository: { full_name: string };
-}
-
-function normalizeGHRun(r: GHApiRun) {
-  return {
-    id: r.id, name: r.display_title ?? r.name, workflow_name: r.name,
-    head_branch: r.head_branch, head_sha: r.head_sha, run_number: r.run_number,
-    event: r.event, status: r.status, conclusion: r.conclusion,
-    repository: r.repository.full_name, html_url: r.html_url,
-    created_at: r.created_at, updated_at: r.updated_at,
-  };
-}
-
-async function getGitHubRuns(res: ServerResponse): Promise<void> {
-  const token = process.env['GITHUB_TOKEN'];
-  if (!token || token.startsWith('ghp_your')) { json(res, 503, { error: 'GITHUB_TOKEN not configured' }); return; }
-  const org  = process.env['GITHUB_ORG'];
-  const user = process.env['GITHUB_USER'];
-  if (!org && !user) { json(res, 503, { error: 'Set GITHUB_ORG or GITHUB_USER in .env' }); return; }
-  try {
-    // Delegate to dataGithubRuns so both paths share caching + rate-limit logic.
-    const runs = await dataGithubRuns();
-    json(res, 200, runs);
-  } catch (err) {
-    json(res, 503, { error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-// ── Cloudflare handlers ───────────────────────────────────────────────────────
-
-function cfHeaders(): Record<string, string> {
-  return { Authorization: `Bearer ${process.env['CF_API_TOKEN'] ?? ''}`, 'Content-Type': 'application/json' };
-}
-
-async function cfFetch(path: string): Promise<unknown> {
-  const accountId = process.env['CF_ACCOUNT_ID'] ?? '';
-  const base = CLOUDFLARE_API_URL.replace(/\/$/, '');
-  const r = await fetch(`${base}/accounts/${accountId}${path}`, { headers: cfHeaders() });
-  const data = await r.json() as { success: boolean; result: unknown; errors: { message: string }[] };
-  if (!data.success) throw new Error(data.errors?.[0]?.message ?? 'Cloudflare API error');
-  return data.result;
-}
-
-async function getCFPages(res: ServerResponse): Promise<void> {
-  const token = process.env['CF_API_TOKEN'];
-  if (!token) { json(res, 503, { error: 'CF_API_TOKEN not configured' }); return; }
-  try {
-    const projects = await cfFetch('/pages/projects');
-    json(res, 200, projects);
-  } catch (e) { json(res, 500, { error: e instanceof Error ? e.message : 'Unknown error' }); }
-}
-
-async function getCFPageDeployments(res: ServerResponse, projectName: string): Promise<void> {
-  const token = process.env['CF_API_TOKEN'];
-  if (!token) { json(res, 503, { error: 'CF_API_TOKEN not configured' }); return; }
-  try {
-    const deployments = await cfFetch(`/pages/projects/${projectName}/deployments`);
-    json(res, 200, deployments);
-  } catch (e) { json(res, 500, { error: e instanceof Error ? e.message : 'Unknown error' }); }
-}
-
-async function getCFWorkers(res: ServerResponse): Promise<void> {
-  const token = process.env['CF_API_TOKEN'];
-  if (!token) { json(res, 503, { error: 'CF_API_TOKEN not configured' }); return; }
-  try {
-    const scripts = await cfFetch('/workers/scripts');
-    json(res, 200, scripts);
-  } catch (e) { json(res, 500, { error: e instanceof Error ? e.message : 'Unknown error' }); }
-}
-
-// ── PayPal handlers ───────────────────────────────────────────────────────────
-
-let _ppToken: { access_token: string; expiresAt: number } | null = null;
-
-async function getPayPalToken(): Promise<string | null> {
-  const clientId     = process.env['PAYPAL_CLIENT_ID'];
-  const clientSecret = process.env['PAYPAL_CLIENT_SECRET'];
-  if (!clientId || !clientSecret) return null;
-  if (_ppToken && Date.now() < _ppToken.expiresAt) return _ppToken.access_token;
-  const env = process.env['PAYPAL_ENV'] ?? 'sandbox';
-  const base = PAYPAL_API_URL || (env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com');
-  const r = await fetch(`${base}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-  if (!r.ok) return null;
-  const data = await r.json() as { access_token: string; expires_in: number };
-  _ppToken = { access_token: data.access_token, expiresAt: Date.now() + (data.expires_in - 60) * 1000 };
-  return _ppToken.access_token;
-}
-
-async function paypalFetch(path: string, token: string): Promise<unknown> {
-  const env = process.env['PAYPAL_ENV'] ?? 'sandbox';
-  const base = PAYPAL_API_URL || (env === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com');
-  const r = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
-  if (!r.ok) { const err = await r.text(); throw new Error(err); }
-  return r.json();
-}
-
-async function getPayPalTransactions(res: ServerResponse): Promise<void> {
-  const token = await getPayPalToken();
-  if (!token) { json(res, 503, { error: 'PayPal credentials not configured' }); return; }
-  try {
-    const end   = new Date();
-    const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const fmt   = (d: Date) => d.toISOString().slice(0, 19) + '+0000'; // PayPal requires this format
-    const data  = await paypalFetch(
-      `/v1/reporting/transactions?start_date=${fmt(start)}&end_date=${fmt(end)}&fields=all&page_size=100`,
-      token,
-    );
-    json(res, 200, data);
-  } catch (e) { json(res, 500, { error: e instanceof Error ? e.message : 'Unknown error' }); }
-}
-
-async function getPayPalBalance(res: ServerResponse): Promise<void> {
-  const token = await getPayPalToken();
-  if (!token) { json(res, 503, { error: 'PayPal credentials not configured' }); return; }
-  try {
-    const data = await paypalFetch('/v1/reporting/balances', token);
-    json(res, 200, data);
-  } catch (e) { json(res, 500, { error: e instanceof Error ? e.message : 'Unknown error' }); }
-}
-
-// ── Data-only fetchers (pure: return data or throw, no res writing) ───────────
-
-async function dataPayments(stripe: Stripe): Promise<unknown> {
-  const charges = await stripe.charges.list({ limit: 50 });
-  return charges.data.map((c) => ({
-    id: c.id, amount: c.amount, currency: c.currency, status: c.status,
-    description: c.description, customer: c.customer, created: c.created,
-    receiptEmail: c.receipt_email,
-  }));
-}
-
-async function dataProducts(stripe: Stripe): Promise<unknown> {
-  const [products, prices] = await Promise.all([
-    stripe.products.list({ limit: 50 }),
-    stripe.prices.list({ limit: 100, active: true }),
-  ]);
-  const priceMap = new Map(prices.data.map((p) => [p.product as string, p]));
-  return products.data.map((p) => ({
-    id: p.id, name: p.name, description: p.description, active: p.active,
-    images: p.images, created: p.created, updated: p.updated,
-    price: priceMap.get(p.id)
-      ? { amount: priceMap.get(p.id)!.unit_amount, currency: priceMap.get(p.id)!.currency, interval: priceMap.get(p.id)!.recurring?.interval }
-      : null,
-  }));
-}
-
-async function dataSubscriptions(stripe: Stripe): Promise<unknown> {
-  const subs = await stripe.subscriptions.list({ limit: 50 });
-  return subs.data.map((s) => ({
-    id: s.id, status: s.status, customer: s.customer,
-    currentPeriodEnd: s.current_period_end, cancelAtPeriodEnd: s.cancel_at_period_end,
-    items: s.items.data.map((i) => ({ priceId: i.price.id, quantity: i.quantity })),
-    created: s.created,
-  }));
-}
-
-async function dataCustomerList(stripe: Stripe): Promise<unknown> {
-  const customers = await stripe.customers.list({ limit: 100 });
-  return customers.data.map((c) => ({
-    id: c.id, email: c.email, name: c.name, created: c.created, currency: c.currency,
-    balance: c.balance, delinquent: c.delinquent, description: c.description,
-  }));
-}
-
-async function dataInvoices(stripe: Stripe): Promise<unknown> {
-  const invoices = await stripe.invoices.list({ limit: 50 });
-  return invoices.data.map((inv) => ({
-    id: inv.id, status: inv.status, customer: inv.customer, subscription: inv.subscription,
-    amountDue: inv.amount_due, amountPaid: inv.amount_paid, total: inv.total,
-    currency: inv.currency, created: inv.created, dueDate: inv.due_date,
-    hostedInvoiceUrl: inv.hosted_invoice_url, invoicePdf: inv.invoice_pdf,
-    number: inv.number, attemptCount: inv.attempt_count,
-  }));
-}
-
-async function dataRefunds(stripe: Stripe): Promise<unknown> {
-  const refunds = await stripe.refunds.list({ limit: 50 });
-  return refunds.data.map((r) => ({
-    id: r.id, amount: r.amount, currency: r.currency, status: r.status,
-    reason: r.reason, charge: r.charge, paymentIntent: r.payment_intent,
-    created: r.created, description: r.description,
-  }));
-}
-
-async function dataWebhooks(stripe: Stripe): Promise<unknown> {
-  const events = await stripe.events.list({ limit: 25 });
-  return events.data.map((e) => ({
-    id: e.id, type: e.type, created: e.created, livemode: e.livemode, apiVersion: e.api_version,
-  }));
-}
-
-async function dataRevenue(stripe: Stripe): Promise<unknown> {
-  const from = Math.floor(Date.now() / 1000) - 30 * 86400;
-  const charges = await stripe.charges.list({ limit: 100, created: { gte: from } });
-  const buckets: Record<string, number> = {};
-  for (const c of charges.data) {
-    if (c.status !== 'succeeded') continue;
-    const day = new Date(c.created * 1000).toISOString().slice(0, 10);
-    buckets[day] = (buckets[day] ?? 0) + c.amount;
-  }
-  return Object.entries(buckets).sort(([a], [b]) => a.localeCompare(b)).map(([date, amount]) => ({ date, amount }));
-}
-
-// ── GitHub helpers ───────────────────────────────────────────────────────────
-
-/** Last successful github-runs payload — served stale on rate-limit errors. */
-let _ghRunsCache: unknown = null;
-/** Epoch ms when the GitHub rate limit resets; 0 = not known / not limited. */
-let _ghRateLimitResetAt = 0;
-
-/**
- * Run `tasks` in batches of `concurrency` at a time, in order.
- * Avoids blasting the GitHub API with 100 simultaneous requests.
- */
-async function batchConcurrent<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-  const results: T[] = [];
-  for (let i = 0; i < tasks.length; i += concurrency) {
-    const slice = tasks.slice(i, i + concurrency).map((fn) => fn());
-    results.push(...await Promise.all(slice));
-  }
-  return results;
-}
-
-async function fetchGithubRunsForUser(token: string, user: string): Promise<GHApiRun[]> {
-  const ghHeaders = { Authorization: `Bearer ${token}`, 'User-Agent': 'TWM-API/1.0', 'X-GitHub-Api-Version': '2022-11-28' };
-  const reposRes = await fetch(`${GITHUB_API_URL}/users/${user}/repos?type=owner&per_page=100`, { headers: ghHeaders });
-  if (!reposRes.ok) {
-    if (reposRes.status === 403 || reposRes.status === 429) {
-      const reset = Number(reposRes.headers.get('x-ratelimit-reset') ?? '0');
-      if (reset) _ghRateLimitResetAt = reset * 1000;
-      throw new Error(`GitHub rate limit (repos list) — resets at ${new Date(_ghRateLimitResetAt).toISOString()}`);
-    }
-    throw new Error(await reposRes.text());
-  }
-  // Track remaining quota from headers.
-  const remaining = Number(reposRes.headers.get('x-ratelimit-remaining') ?? '-1');
-  const reset = Number(reposRes.headers.get('x-ratelimit-reset') ?? '0');
-  if (reset) _ghRateLimitResetAt = reset * 1000;
-
-  const repos = await reposRes.json() as { full_name: string }[];
-  const capped = repos.slice(0, 50); // cap at 50 repos to preserve quota
-
-  // Warn early if we're close to the limit before firing per-repo requests.
-  if (remaining >= 0 && remaining < capped.length + 10) {
-    console.warn(`  [github] only ${remaining} API calls remaining — skipping per-repo run fetches to avoid rate limit`);
-    return [];
-  }
-
-  const tasks = capped.map((repo) => async () => {
-    const r = await fetch(`${GITHUB_API_URL}/repos/${repo.full_name}/actions/runs?per_page=10`, { headers: ghHeaders });
-    if (!r.ok) {
-      if (r.status === 403 || r.status === 429) {
-        const rs = Number(r.headers.get('x-ratelimit-reset') ?? '0');
-        if (rs) _ghRateLimitResetAt = rs * 1000;
-        throw new Error(`GitHub rate limit hit on ${repo.full_name}`);
-      }
-      return [] as GHApiRun[];
-    }
-    const body = await r.json() as { workflow_runs?: GHApiRun[] };
-    return body.workflow_runs ?? [] as GHApiRun[];
-  });
-
-  // Fetch 5 repos at a time to stay well within burst limits.
-  const runArrays = await batchConcurrent(tasks, 5);
-  return runArrays.flat().sort((a, b) => b.run_number - a.run_number).slice(0, 50);
-}
-
-async function dataGithubRuns(): Promise<unknown> {
-  const token = process.env['GITHUB_TOKEN'];
-  if (!token || token.startsWith('ghp_your')) throw new Error('GITHUB_TOKEN not configured');
-  const org  = process.env['GITHUB_ORG'];
-  const user = process.env['GITHUB_USER'];
-  if (!org && !user) throw new Error('Set GITHUB_ORG or GITHUB_USER in .env');
-
-  // If we know the rate limit hasn't reset yet, return cached data immediately.
-  if (_ghRateLimitResetAt > 0 && Date.now() < _ghRateLimitResetAt) {
-    const waitSec = Math.ceil((_ghRateLimitResetAt - Date.now()) / 1000);
-    console.warn(`  [github] rate-limited — skipping fetch, resets in ${waitSec}s  (serving cached data)`);
-    if (_ghRunsCache) return _ghRunsCache;
-    throw new Error(`GitHub rate limit active, resets in ${waitSec}s`);
-  }
-
-  const ghHeaders = { Authorization: `Bearer ${token}`, 'User-Agent': 'TWM-API/1.0', 'X-GitHub-Api-Version': '2022-11-28' };
-  try {
-    let runs: unknown;
-    if (org) {
-      const apiUrl = `${GITHUB_API_URL}/orgs/${org}/actions/runs?per_page=50`;
-      const ghRes = await fetch(apiUrl, { headers: ghHeaders });
-      if (!ghRes.ok) {
-        if (ghRes.status === 403 || ghRes.status === 429) {
-          const reset = Number(ghRes.headers.get('x-ratelimit-reset') ?? '0');
-          if (reset) _ghRateLimitResetAt = reset * 1000;
-          const waitSec = reset ? Math.ceil((reset * 1000 - Date.now()) / 1000) : '?';
-          console.warn(`  [github] rate limit hit (org runs) — resets in ${waitSec}s`);
-          if (_ghRunsCache) { console.warn('  [github] serving stale cache'); return _ghRunsCache; }
-        }
-        throw new Error(await ghRes.text());
-      }
-      const body = await ghRes.json() as { workflow_runs: GHApiRun[] };
-      runs = (body.workflow_runs ?? []).map(normalizeGHRun);
-    } else {
-      const rawRuns = await fetchGithubRunsForUser(token, user!);
-      runs = rawRuns.map(normalizeGHRun);
-    }
-    _ghRunsCache = runs; // update cache on success
-    _ghRateLimitResetAt = 0; // clear any previous rate-limit timer
-    return runs;
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if ((msg.includes('rate limit') || msg.includes('403')) && _ghRunsCache) {
-      console.warn(`  [github] error — ${msg}  (serving stale cache)`);
-      return _ghRunsCache;
-    }
-    throw e;
-  }
-}
-
-async function dataCFPages(): Promise<unknown> {
-  if (!process.env['CF_API_TOKEN']) throw new Error('CF_API_TOKEN not configured');
-  return cfFetch('/pages/projects');
-}
-
-async function dataCFWorkers(): Promise<unknown> {
-  if (!process.env['CF_API_TOKEN']) throw new Error('CF_API_TOKEN not configured');
-  return cfFetch('/workers/scripts');
-}
-
-async function dataPayPal(): Promise<unknown> {
-  const token = await getPayPalToken();
-  if (!token) throw new Error('PayPal credentials not configured');
-  const end   = new Date();
-  const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const fmt   = (d: Date) => d.toISOString().slice(0, 19) + '+0000';
-  const [txData, balData] = await Promise.all([
-    paypalFetch(`/v1/reporting/transactions?start_date=${fmt(start)}&end_date=${fmt(end)}&fields=all&page_size=100`, token),
-    paypalFetch('/v1/reporting/balances', token),
-  ]);
-  return {
-    transactions: (txData as { transaction_details?: unknown[] }).transaction_details ?? [],
-    balances:     (balData  as { balances?: unknown[] }).balances ?? [],
-  };
-}
-
-// ── Vercel ────────────────────────────────────────────────────────────────────
-async function dataVercelDeployments(): Promise<unknown> {
-  const token = process.env['VERCEL_TOKEN'];
-  if (!token) throw new Error('VERCEL_TOKEN not configured');
-  const teamQuery = process.env['VERCEL_TEAM_ID'] ? `&teamId=${process.env['VERCEL_TEAM_ID']}` : '';
-  const r = await fetch(`https://api.vercel.com/v6/deployments?limit=20${teamQuery}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const data = await r.json() as { deployments?: unknown[] };
-  return data.deployments ?? [];
-}
-
-async function getVercelDeployments(res: ServerResponse): Promise<void> {
-  const token = process.env['VERCEL_TOKEN'];
-  if (!token) { json(res, 503, { error: 'VERCEL_TOKEN not set' }); return; }
-  try {
-    const data = await dataVercelDeployments();
-    json(res, 200, data);
-  } catch (e) {
-    json(res, 502, { error: e instanceof Error ? e.message : 'Unknown error' });
-  }
-}
-
-// ── Netlify ───────────────────────────────────────────────────────────────────
-async function dataNetlifyDeployments(): Promise<unknown> {
-  const token = process.env['NETLIFY_TOKEN'];
-  if (!token) throw new Error('NETLIFY_TOKEN not configured');
-  const headers = { Authorization: `Bearer ${token}` };
-  const sitesRes = await fetch('https://api.netlify.com/api/v1/sites?per_page=10', { headers });
-  const sites = await sitesRes.json() as Array<{ id: string }>;
-  const deployArrays = await Promise.all(
-    sites.slice(0, 5).map(s =>
-      fetch(`https://api.netlify.com/api/v1/sites/${s.id}/deploys?per_page=5`, { headers })
-        .then(r => r.json())
-    )
-  );
-  return (deployArrays as unknown[][]).flat();
-}
-
-async function getNetlifyDeployments(res: ServerResponse): Promise<void> {
-  const token = process.env['NETLIFY_TOKEN'];
-  if (!token) { json(res, 503, { error: 'NETLIFY_TOKEN not set' }); return; }
-  try {
-    const data = await dataNetlifyDeployments();
-    json(res, 200, data);
-  } catch (e) {
-    json(res, 502, { error: e instanceof Error ? e.message : 'Unknown error' });
-  }
-}
-
-// ── CircleCI ──────────────────────────────────────────────────────────────────
-async function dataCircleCIPipelines(): Promise<unknown> {
-  const token = process.env['CIRCLECI_TOKEN'];
-  const orgSlug = process.env['CIRCLECI_ORG_SLUG'];
-  if (!token || !orgSlug) throw new Error('CIRCLECI_TOKEN or CIRCLECI_ORG_SLUG not configured');
-  const r = await fetch(`https://circleci.com/api/v2/pipeline?org-slug=${orgSlug}&mine=false`, {
-    headers: { 'Circle-Token': token },
-  });
-  const data = await r.json() as { items?: unknown[] };
-  const pipelines = data.items ?? [];
-  const workflowResults = await Promise.all(
-    (pipelines as Array<{ id: string }>).slice(0, 10).map(p =>
-      fetch(`https://circleci.com/api/v2/pipeline/${p.id}/workflow`, { headers: { 'Circle-Token': token } })
-        .then(r2 => r2.json())
-        .then((d: { items?: unknown[] }) => d.items ?? [])
-    )
-  );
-  return { pipelines, workflows: workflowResults.flat() };
-}
-
-async function dataCircleCIInsights(): Promise<unknown> {
-  const token = process.env['CIRCLECI_TOKEN'];
-  const orgSlug = process.env['CIRCLECI_ORG_SLUG'];
-  if (!token || !orgSlug) throw new Error('CIRCLECI_TOKEN or CIRCLECI_ORG_SLUG not configured');
-  const r = await fetch(`https://circleci.com/api/v2/insights/${orgSlug}/workflows?reporting-window=last-30-days`, {
-    headers: { 'Circle-Token': token },
-  });
-  const data = await r.json() as { items?: unknown[] };
-  return { insights: data.items ?? [] };
-}
-
-// ── Travis CI ─────────────────────────────────────────────────────────────────
-async function dataTravisBuilds(): Promise<unknown> {
-  const token = process.env['TRAVIS_TOKEN'];
-  const org = process.env['TRAVIS_ORG'];
-  if (!token || !org) throw new Error('TRAVIS_TOKEN or TRAVIS_ORG not configured');
-  const r = await fetch(`https://api.travis-ci.com/v3/owner/${org}/builds?limit=25&include=build.repository,build.branch,build.commit`, {
-    headers: { 'Travis-API-Version': '3', 'Authorization': `token ${token}` },
-  });
-  const data = await r.json() as { builds?: unknown[] };
-  return { builds: data.builds ?? [] };
-}
-
-// ── Bitrise ───────────────────────────────────────────────────────────────────
-async function dataBitriseBuilds(): Promise<unknown> {
-  const token = process.env['BITRISE_TOKEN'];
-  if (!token) throw new Error('BITRISE_TOKEN not configured');
-  const headers = { Authorization: `token ${token}` };
-  const appsRes = await fetch('https://api.bitrise.io/v0.1/apps?limit=10', { headers });
-  const appsData = await appsRes.json() as { data?: Array<{ slug: string }> };
-  const apps = appsData.data ?? [];
-  if (!apps.length) return { builds: [], apps: [] };
-  const buildArrays = await Promise.all(
-    apps.slice(0, 3).map(app =>
-      fetch(`https://api.bitrise.io/v0.1/apps/${app.slug}/builds?limit=10`, { headers })
-        .then(r => r.json())
-        .then((d: { data?: unknown[] }) => d.data ?? [])
-    )
-  );
-  return { builds: (buildArrays as unknown[][]).flat(), apps };
-}
-
-// ── Docker Hub ────────────────────────────────────────────────────────────────
-async function dataDockerHubRepos(): Promise<unknown> {
-  const username = process.env['DOCKERHUB_USERNAME'];
-  if (!username) throw new Error('DOCKERHUB_USERNAME not configured');
-  const token = process.env['DOCKERHUB_TOKEN'];
-  const headers: Record<string, string> = {};
-  if (token) {
-    // Get JWT via login
-    const loginRes = await fetch('https://hub.docker.com/v2/users/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password: token }),
-    });
-    const loginData = await loginRes.json() as { token?: string };
-    if (loginData.token) headers['Authorization'] = `Bearer ${loginData.token}`;
-  }
-  const r = await fetch(`https://hub.docker.com/v2/repositories/${username}/?page_size=25`, { headers });
-  const data = await r.json() as { results?: unknown[] };
-  return { repos: data.results ?? [] };
-}
-
-// ── SonarQube ─────────────────────────────────────────────────────────────────
-async function dataSonarQubeQuality(): Promise<unknown> {
-  const url = process.env['SONARQUBE_URL'];
-  const token = process.env['SONARQUBE_TOKEN'];
-  if (!url || !token) throw new Error('SONARQUBE_URL or SONARQUBE_TOKEN not configured');
-  const auth = Buffer.from(`${token}:`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}` };
-  const projectsRes = await fetch(`${url}/api/projects/search?ps=50`, { headers });
-  const projectsData = await projectsRes.json() as { components?: Array<{ key: string; name: string }> };
-  const projects = projectsData.components ?? [];
-  const gates = await Promise.all(
-    projects.slice(0, 20).map(async p => {
-      const gateRes = await fetch(`${url}/api/qualitygates/project_status?projectKey=${p.key}`, { headers });
-      const gateData = await gateRes.json() as { projectStatus?: { status: string; conditions?: unknown[] } };
-      return {
-        projectKey: p.key,
-        projectName: p.name,
-        status: gateData.projectStatus?.status ?? 'NONE',
-        conditions: gateData.projectStatus?.conditions ?? [],
-      };
-    })
-  );
-  return { gates };
-}
-
-async function dataSonarQubeMeasures(): Promise<unknown> {
-  const url = process.env['SONARQUBE_URL'];
-  const token = process.env['SONARQUBE_TOKEN'];
-  if (!url || !token) throw new Error('SONARQUBE_URL or SONARQUBE_TOKEN not configured');
-  const auth = Buffer.from(`${token}:`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}` };
-  const metrics = 'bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density';
-  const projectsRes = await fetch(`${url}/api/projects/search?ps=10`, { headers });
-  const projectsData = await projectsRes.json() as { components?: Array<{ key: string }> };
-  const projects = projectsData.components ?? [];
-  const measures = await Promise.all(
-    projects.slice(0, 5).map(async p => {
-      const r = await fetch(`${url}/api/measures/component?component=${p.key}&metricKeys=${metrics}`, { headers });
-      const d = await r.json() as { component?: { measures?: unknown[] } };
-      return { component: p.key, measures: d.component?.measures ?? [] };
-    })
-  );
-  return { measures };
-}
-
-async function dataSonarQubeIssues(): Promise<unknown> {
-  const url = process.env['SONARQUBE_URL'];
-  const token = process.env['SONARQUBE_TOKEN'];
-  if (!url || !token) throw new Error('SONARQUBE_URL or SONARQUBE_TOKEN not configured');
-  const auth = Buffer.from(`${token}:`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}` };
-  const r = await fetch(`${url}/api/issues/search?ps=50&statuses=OPEN,CONFIRMED&severities=BLOCKER,CRITICAL,MAJOR`, { headers });
-  const d = await r.json() as { issues?: unknown[]; total?: number };
-  return { issues: d.issues ?? [], total: d.total ?? 0 };
-}
-
-// ── Azure DevOps ──────────────────────────────────────────────────────────────
-async function dataAzurePipelines(): Promise<unknown> {
-  const org = process.env['AZURE_DEVOPS_ORG'];
-  const token = process.env['AZURE_DEVOPS_TOKEN'];
-  const project = process.env['AZURE_DEVOPS_PROJECT'];
-  if (!org || !token) throw new Error('AZURE_DEVOPS_ORG or AZURE_DEVOPS_TOKEN not configured');
-  const auth = Buffer.from(`:${token}`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}` };
-  const proj = project ? `${project}/` : '';
-  const r = await fetch(`https://dev.azure.com/${org}/${proj}_apis/pipelines/runs?api-version=7.0&$top=25`, { headers });
-  const d = await r.json() as { value?: unknown[] };
-  const runs = (d.value ?? []) as Array<Record<string, unknown>>;
-  return { runs: runs.map(run => ({ ...run, project: project ?? org })) };
-}
-
-async function dataAzureReleases(): Promise<unknown> {
-  const org = process.env['AZURE_DEVOPS_ORG'];
-  const token = process.env['AZURE_DEVOPS_TOKEN'];
-  const project = process.env['AZURE_DEVOPS_PROJECT'];
-  if (!org || !token || !project) throw new Error('AZURE_DEVOPS_ORG, AZURE_DEVOPS_TOKEN, or AZURE_DEVOPS_PROJECT not configured');
-  const auth = Buffer.from(`:${token}`).toString('base64');
-  const r = await fetch(`https://vsrm.dev.azure.com/${org}/${project}/_apis/release/releases?api-version=7.0&$top=25`, {
-    headers: { Authorization: `Basic ${auth}` },
-  });
-  const d = await r.json() as { value?: unknown[] };
-  return { releases: (d.value ?? []).map((rel: unknown) => ({ ...(rel as Record<string, unknown>), project })) };
-}
-
-async function dataAzureWorkItems(): Promise<unknown> {
-  const org = process.env['AZURE_DEVOPS_ORG'];
-  const token = process.env['AZURE_DEVOPS_TOKEN'];
-  const project = process.env['AZURE_DEVOPS_PROJECT'];
-  if (!org || !token || !project) throw new Error('AZURE_DEVOPS_ORG, AZURE_DEVOPS_TOKEN, or AZURE_DEVOPS_PROJECT not configured');
-  const auth = Buffer.from(`:${token}`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' };
-  const wiqlRes = await fetch(`https://dev.azure.com/${org}/${project}/_apis/wit/wiql?api-version=7.0`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ query: "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.State] != 'Closed' ORDER BY [System.ChangedDate] DESC" }),
-  });
-  const wiqlData = await wiqlRes.json() as { workItems?: Array<{ id: number }> };
-  const ids = (wiqlData.workItems ?? []).slice(0, 25).map(w => w.id);
-  if (!ids.length) return { workItems: [] };
-  const batchRes = await fetch(`https://dev.azure.com/${org}/${project}/_apis/wit/workitemsbatch?api-version=7.0`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ids, fields: ['System.Id', 'System.Title', 'System.WorkItemType', 'System.State', 'System.AssignedTo', 'System.CreatedDate', 'System.ChangedDate'] }),
-  });
-  const batchData = await batchRes.json() as { value?: unknown[] };
-  return { workItems: batchData.value ?? [] };
-}
-
-// ── npm ───────────────────────────────────────────────────────────────────────
-async function dataNpmDownloads(): Promise<unknown> {
-  const pkgsEnv = process.env['NPM_PACKAGES'];
-  if (!pkgsEnv) throw new Error('NPM_PACKAGES not configured');
-  const packages = pkgsEnv.split(',').map(s => s.trim()).filter(Boolean);
-  const results = await Promise.all(
-    packages.map(async pkg => {
-      const r = await fetch(`https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(pkg)}`);
-      const d = await r.json() as { downloads?: number; package?: string; start?: string; end?: string; error?: string };
-      if (d.error) return { package: pkg, downloads: 0, period: 'last-month', start: '', end: '' };
-      return { package: d.package ?? pkg, downloads: d.downloads ?? 0, period: 'last-month', start: d.start ?? '', end: d.end ?? '' };
-    })
-  );
-  return { packages: results };
-}
-
-// ── jsDelivr ──────────────────────────────────────────────────────────────────
-async function dataJsDelivrStats(): Promise<unknown> {
-  const pkgsEnv = process.env['JSDELIVR_PACKAGES'];
-  if (!pkgsEnv) throw new Error('JSDELIVR_PACKAGES not configured');
-  const packages = pkgsEnv.split(',').map(s => s.trim()).filter(Boolean);
-  const results = await Promise.all(
-    packages.map(async pkg => {
-      const [type, name] = pkg.startsWith('gh/') ? ['gh', pkg.slice(3)] : ['npm', pkg];
-      const r = await fetch(`https://data.jsdelivr.com/v1/stats/packages/${type}/${encodeURIComponent(name)}/year`);
-      const d = await r.json() as { hits?: { total?: number; dates?: Record<string, number> }; bandwidth?: { total?: number; dates?: Record<string, number> } };
-      return {
-        name,
-        type,
-        hits: { total: d.hits?.total ?? 0, dates: d.hits?.dates ?? {} },
-        bandwidth: { total: d.bandwidth?.total ?? 0, dates: d.bandwidth?.dates ?? {} },
-      };
-    })
-  );
-  return { packages: results };
-}
-
-// ── WakaTime ──────────────────────────────────────────────────────────────────
-async function dataWakaTimeSummary(): Promise<unknown> {
-  const apiKey = process.env['WAKATIME_API_KEY'];
-  if (!apiKey) throw new Error('WAKATIME_API_KEY not configured');
-  const auth = Buffer.from(apiKey).toString('base64');
-  const r = await fetch('https://wakatime.com/api/v1/users/current/summaries?range=last_7_days', {
-    headers: { Authorization: `Basic ${auth}` },
-  });
-  const d = await r.json() as { data?: unknown[] };
-  return { data: d.data ?? [] };
-}
-
-// ── Clockify ──────────────────────────────────────────────────────────────────
-async function dataClockifyTimeEntries(): Promise<unknown> {
-  const apiKey = process.env['CLOCKIFY_API_KEY'];
-  const workspaceId = process.env['CLOCKIFY_WORKSPACE_ID'];
-  const userId = process.env['CLOCKIFY_USER_ID'];
-  if (!apiKey || !workspaceId) throw new Error('CLOCKIFY_API_KEY or CLOCKIFY_WORKSPACE_ID not configured');
-  const headers = { 'X-Api-Key': apiKey };
-  let uid = userId;
-  if (!uid) {
-    const meRes = await fetch('https://api.clockify.me/api/v1/user', { headers });
-    const me = await meRes.json() as { id: string };
-    uid = me.id;
-  }
-  const r = await fetch(`https://api.clockify.me/api/v1/workspaces/${workspaceId}/user/${uid}/time-entries?page-size=50`, { headers });
-  const entries = await r.json() as unknown[];
-  const projectNames = new Map<string, string>();
-  const entriesWithNames = await Promise.all(
-    (entries as Array<Record<string, unknown>>).slice(0, 20).map(async e => {
-      const projId = e['projectId'] as string | undefined;
-      if (projId && !projectNames.has(projId)) {
-        try {
-          const proj = await fetch(`https://api.clockify.me/api/v1/workspaces/${workspaceId}/projects/${projId}`, { headers });
-          const projData = await proj.json() as { name: string };
-          projectNames.set(projId, projData.name);
-        } catch { /* skip */ }
-      }
-      return { ...e, projectName: projId ? projectNames.get(projId) : undefined };
-    })
-  );
-  return { entries: entriesWithNames };
-}
-
-// ── Linear ────────────────────────────────────────────────────────────────────
-async function dataLinearIssues(): Promise<unknown> {
-  const apiKey = process.env['LINEAR_API_KEY'];
-  if (!apiKey) throw new Error('LINEAR_API_KEY not configured');
-  const query = `
-    query {
-      issues(first: 50, orderBy: updatedAt, filter: { state: { type: { nin: ["completed", "cancelled"] } } }) {
-        nodes {
-          id identifier title priority
-          state { id name type color }
-          assignee { id name email }
-          team { id name key }
-          createdAt updatedAt url
-          labels { nodes { id name color } }
-        }
-      }
-    }
-  `;
-  const r = await fetch('https://api.linear.app/graphql', {
-    method: 'POST',
-    headers: { 'Authorization': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-  });
-  const d = await r.json() as { data?: { issues?: { nodes?: unknown[] } } };
-  const raw = d.data?.issues?.nodes ?? [];
-  const issues = (raw as Array<Record<string, unknown>>).map(i => ({
-    ...i,
-    labels: ((i['labels'] as { nodes?: unknown[] } | undefined)?.nodes ?? []),
-  }));
-  return { issues };
-}
-
-// ── Jira ──────────────────────────────────────────────────────────────────────
-async function dataJiraIssues(): Promise<unknown> {
-  const host = process.env['JIRA_HOST'];
-  const email = process.env['JIRA_EMAIL'];
-  const token = process.env['JIRA_API_TOKEN'];
-  const jql = process.env['JIRA_JQL'] ?? 'assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC';
-  if (!host || !email || !token) throw new Error('JIRA_HOST, JIRA_EMAIL, or JIRA_API_TOKEN not configured');
-  const auth = Buffer.from(`${email}:${token}`).toString('base64');
-  const r = await fetch(`https://${host}/rest/api/3/search?jql=${encodeURIComponent(jql)}&maxResults=50&fields=summary,status,priority,issuetype,assignee,reporter,created,updated,labels,fixVersions`, {
-    headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
-  });
-  const d = await r.json() as { issues?: unknown[]; total?: number };
-  const issues = ((d.issues ?? []) as Array<Record<string, unknown>>).map(issue => ({
-    ...issue,
-    browseUrl: `https://${host}/browse/${issue['key'] as string}`,
-  }));
-  return { issues, total: d.total ?? 0 };
-}
-
-// ── Slack ─────────────────────────────────────────────────────────────────────
-async function dataSlackMessages(): Promise<unknown> {
-  const token = process.env['SLACK_BOT_TOKEN'];
-  const channelsEnv = process.env['SLACK_CHANNELS'];
-  if (!token) throw new Error('SLACK_BOT_TOKEN not configured');
-  const headers = { Authorization: `Bearer ${token}` };
-  const channels = channelsEnv ? channelsEnv.split(',').map(s => s.trim()).filter(Boolean) : [];
-  if (!channels.length) {
-    const listRes = await fetch('https://slack.com/api/conversations.list?limit=5&types=public_channel', { headers });
-    const listData = await listRes.json() as { channels?: Array<{ id: string; name: string }> };
-    const chans = listData.channels ?? [];
-    channels.push(...chans.slice(0, 3).map(c => c.id));
-  }
-  const allMessages: unknown[] = [];
-  for (const channel of channels.slice(0, 3)) {
-    const r = await fetch(`https://slack.com/api/conversations.history?channel=${channel}&limit=20`, { headers });
-    const d = await r.json() as { messages?: Array<Record<string, unknown>>; ok?: boolean };
-    if (d.ok && d.messages) {
-      allMessages.push(...d.messages.slice(0, 10).map(m => ({ ...m, channel })));
-    }
-  }
-  return { messages: allMessages.slice(0, 30) };
-}
-
-// ── Discord ───────────────────────────────────────────────────────────────────
-async function dataDiscordServerStats(): Promise<unknown> {
-  const token = process.env['DISCORD_BOT_TOKEN'];
-  const guildIds = process.env['DISCORD_GUILD_IDS'];
-  if (!token) throw new Error('DISCORD_BOT_TOKEN not configured');
-  const headers = { Authorization: `Bot ${token}` };
-  const ids = guildIds ? guildIds.split(',').map(s => s.trim()).filter(Boolean) : [];
-  if (!ids.length) {
-    const guildsRes = await fetch('https://discord.com/api/v10/users/@me/guilds', { headers });
-    const guilds = await guildsRes.json() as Array<{ id: string }>;
-    ids.push(...guilds.slice(0, 5).map(g => g.id));
-  }
-  const guilds = await Promise.all(
-    ids.slice(0, 5).map(id =>
-      fetch(`https://discord.com/api/v10/guilds/${id}?with_counts=true`, { headers }).then(r => r.json())
-    )
-  );
-  return { guilds };
-}
-
-// ── Mailchimp ─────────────────────────────────────────────────────────────────
-async function dataMailchimpCampaigns(): Promise<unknown> {
-  const apiKey = process.env['MAILCHIMP_API_KEY'];
-  if (!apiKey) throw new Error('MAILCHIMP_API_KEY not configured');
-  const server = apiKey.split('-').pop() ?? 'us1';
-  const auth = Buffer.from(`anystring:${apiKey}`).toString('base64');
-  const headers = { Authorization: `Basic ${auth}` };
-  const r = await fetch(`https://${server}.api.mailchimp.com/3.0/campaigns?count=25&sort_field=send_time&sort_dir=DESC`, { headers });
-  const d = await r.json() as { campaigns?: unknown[]; total_items?: number };
-  return { campaigns: d.campaigns ?? [], total_items: d.total_items ?? 0 };
-}
-
-// ── GA4 ───────────────────────────────────────────────────────────────────────
-let _ga4TokenCache: { token: string; expiry: number } | null = null;
-
-async function getGA4AccessToken(): Promise<string> {
-  if (_ga4TokenCache && Date.now() < _ga4TokenCache.expiry) return _ga4TokenCache.token;
-  const serviceAccountJson = process.env['GA4_SERVICE_ACCOUNT_JSON'];
-  if (!serviceAccountJson) throw new Error('GA4_SERVICE_ACCOUNT_JSON not configured');
-  const sa = JSON.parse(serviceAccountJson) as { client_email: string; private_key: string };
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const payload = {
-    iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/analytics.readonly',
-    aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600,
-    iat: now,
-  };
-  const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-  const headerB64 = encode(header);
-  const payloadB64 = encode(payload);
-  const sigInput = `${headerB64}.${payloadB64}`;
-  const keyPem = sa.private_key.replace(/\\n/g, '\n');
-  const keyBuffer = Buffer.from(
-    keyPem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, ''),
-    'base64'
-  );
-  const cryptoKey = await crypto.subtle.importKey('pkcs8', keyBuffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', cryptoKey, Buffer.from(sigInput));
-  const sigB64 = Buffer.from(sig).toString('base64url');
-  const jwt = `${sigInput}.${sigB64}`;
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
-  });
-  const tokenData = await tokenRes.json() as { access_token?: string; expires_in?: number };
-  if (!tokenData.access_token) throw new Error('Failed to get GA4 access token');
-  _ga4TokenCache = { token: tokenData.access_token, expiry: Date.now() + (tokenData.expires_in ?? 3600) * 1000 - 60000 };
-  return tokenData.access_token;
-}
-
-async function dataGA4Sessions(): Promise<unknown> {
-  const propertyId = process.env['GA4_PROPERTY_ID'];
-  if (!propertyId) throw new Error('GA4_PROPERTY_ID not configured');
-  const token = await getGA4AccessToken();
-  const r = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      dimensions: [{ name: 'date' }],
-      metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'screenPageViews' }],
-      dateRanges: [{ startDate: '14daysAgo', endDate: 'today' }],
-    }),
-  });
-  const d = await r.json() as { rows?: Array<{ dimensionValues: Array<{ value: string }>; metricValues: Array<{ value: string }> }> };
-  const rows = d.rows ?? [];
-  const sorted = rows.sort((a, b) => a.dimensionValues[0].value.localeCompare(b.dimensionValues[0].value));
-  const dates = sorted.map(r => r.dimensionValues[0].value);
-  const sessions = sorted.map(r => parseInt(r.metricValues[0].value));
-  const users = sorted.map(r => parseInt(r.metricValues[1].value));
-  const pageviews = sorted.map(r => parseInt(r.metricValues[2].value));
-  const totals = {
-    sessions: sessions.reduce((a, b) => a + b, 0),
-    users: users.reduce((a, b) => a + b, 0),
-    pageviews: pageviews.reduce((a, b) => a + b, 0),
-  };
-  return { trend: { dates, sessions, users, pageviews }, totals };
-}
-
-// ── Instatus ──────────────────────────────────────────────────────────────────
-async function dataInstatusOverview(): Promise<unknown> {
-  const pageId = process.env['INSTATUS_PAGE_ID'];
-  const apiKey = process.env['INSTATUS_API_KEY'];
-  if (!pageId) throw new Error('INSTATUS_PAGE_ID not configured');
-  if (apiKey) {
-    // Authenticated API
-    const headers = { Authorization: `Bearer ${apiKey}` };
-    const [pageRes, componentsRes, incidentsRes] = await Promise.all([
-      fetch(`https://api.instatus.com/v1/${pageId}`, { headers }),
-      fetch(`https://api.instatus.com/v1/${pageId}/components`, { headers }),
-      fetch(`https://api.instatus.com/v1/${pageId}/incidents?status=INVESTIGATING,IDENTIFIED,MONITORING,IN_PROGRESS`, { headers }),
-    ]);
-    const [page, { components }, { incidents }] = await Promise.all([
-      pageRes.json() as Promise<{ id: string; name: string; url: string; status: string }>,
-      componentsRes.json() as Promise<{ components?: unknown[] }>,
-      incidentsRes.json() as Promise<{ incidents?: unknown[] }>,
-    ]);
-    return {
-      page: { id: page.id, name: page.name, url: page.url, status: page.status },
-      components: components ?? [],
-      activeIncidents: incidents ?? [],
-      activeMaintenances: [],
-    };
-  } else {
-    // Public summary.json
-    const r = await fetch(`https://${pageId}.instatus.com/summary.json`);
-    const d = await r.json() as {
-      page?: { id: string; name: string; url: string; status: { indicator: string } };
-      components?: unknown[];
-      incidents?: unknown[];
-    };
-    return {
-      page: { id: d.page?.id ?? '', name: d.page?.name ?? '', url: d.page?.url ?? '', status: d.page?.status.indicator ?? 'operational' },
-      components: d.components ?? [],
-      activeIncidents: d.incidents ?? [],
-      activeMaintenances: [],
-    };
-  }
-}
-
-// ── HackerNews ────────────────────────────────────────────────────────────────
-async function dataHNTopStories(): Promise<unknown> {
-  const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
-  const ids = await r.json() as number[];
-  const top = ids.slice(0, 30);
-  const stories = await Promise.all(
-    top.map((id, rank) =>
-      fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)
-        .then(r2 => r2.json())
-        .then((s: unknown) => ({ ...(s as Record<string, unknown>), rank: rank + 1 }))
-    )
-  );
-  return { stories };
-}
-
-// ── RSS Feed ─────────────────────────────────────────────────────────────────
-const _rssCache = new Map<string, { data: unknown; ts: number }>();
-const RSS_CACHE_MS = 5 * 60 * 1000;
-
-function _rssTag(tag: string, chunk: string): string {
-  const m = chunk.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`, 'i'));
-  return m ? m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim() : '';
-}
-
-async function dataRssFeed(feedUrl: string, maxItems = 50): Promise<unknown> {
-  const cacheKey = `${feedUrl}::${maxItems}`;
-  const cached = _rssCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < RSS_CACHE_MS) return cached.data;
-
-  const r = await fetch(feedUrl, { headers: { 'User-Agent': 'TWM-Dashboard/1.0' } });
-  if (!r.ok) throw new Error(`RSS fetch failed: ${r.status} ${r.statusText}`);
-  const xml = await r.text();
-
-  const isAtom = /<feed\b/i.test(xml);
-  const itemTag = isAtom ? 'entry' : 'item';
-  const feedTitle = _rssTag('title', xml.split(new RegExp(`<${itemTag}[\\s>]`))[0] ?? xml);
-
-  const parts = xml.split(new RegExp(`<${itemTag}[\\s>]`)).slice(1);
-  const clampedMax = Math.max(1, Math.min(200, maxItems));
-  const items = parts.slice(0, clampedMax).map(part => {
-    const chunk = `<${itemTag} ` + part;
-    const title = _rssTag('title', chunk);
-    // Atom uses <link href="..."/>, RSS uses <link>url</link>
-    const linkHref = chunk.match(/<link[^>]+href=["']([^"']+)["'][^>]*>/i)?.[1] ?? '';
-    const linkText = _rssTag('link', chunk);
-    const link = linkHref || linkText;
-    const pubDate = _rssTag(isAtom ? 'published' : 'pubDate', chunk) || _rssTag('updated', chunk);
-    const summary = _rssTag(isAtom ? 'summary' : 'description', chunk)
-      .replace(/<[^>]+>/g, '').trim().slice(0, 220);
-    return { title, link, pubDate, summary };
-  }).filter(i => i.title);
-
-  const data = { feedTitle: feedTitle || feedUrl, url: feedUrl, items, fetchedAt: new Date().toISOString() };
-  _rssCache.set(cacheKey, { data, ts: Date.now() });
-  return data;
-}
-
-// ── Alpha Vantage ─────────────────────────────────────────────────────────────
-let _avCache: unknown = null;
-let _avCacheTime = 0;
-let _avSparkCache: unknown = null;
-let _avSparkCacheTime = 0;
-let _avMktStatusCache: unknown = null;
-let _avMktStatusCacheTime = 0;
-let _avMoversCache: unknown = null;
-let _avMoversCacheTime = 0;
-let _avNewsCache: unknown = null;
-let _avNewsCacheTime = 0;
-let _avEarningsCache: unknown = null;
-let _avEarningsCacheTime = 0;
-
-async function dataAlphaVantageQuotes(): Promise<unknown> {
-  const now = Date.now();
-  if (_avCache && now - _avCacheTime < 3600000) return _avCache; // 1h cache
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const stocks: unknown[] = [];
-  let rateLimit = false;
-  for (const symbol of symbols) {
-    await new Promise(r => setTimeout(r, 12000)); // 12s delay (5/min limit)
-    const r = await fetch(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) { rateLimit = true; continue; }
-    const q = d['Global Quote'] as Record<string, string> | undefined;
-    if (q) {
-      stocks.push({
-        symbol,
-        quote: {
-          symbol: q['01. symbol'],
-          open: q['02. open'],
-          high: q['03. high'],
-          low: q['04. low'],
-          price: q['05. price'],
-          volume: q['06. volume'],
-          latestTradingDay: q['07. latest trading day'],
-          previousClose: q['08. previous close'],
-          change: q['09. change'],
-          changePercent: q['10. change percent'],
-        },
-        timeSeries: [],
-      });
-    }
-  }
-  const result = { stocks, rateLimit };
-  _avCache = result;
-  _avCacheTime = now;
-  return result;
-}
-
-async function dataAvSparklines(): Promise<unknown> {
-  const now = Date.now();
-  if (_avSparkCache && now - _avSparkCacheTime < 3600000) return _avSparkCache; // 1h cache
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const sparklines: unknown[] = [];
-  let rateLimit = false;
-  for (const symbol of symbols) {
-    await new Promise(r => setTimeout(r, 12000)); // 12s delay (5/min limit)
-    const r = await fetch(`https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${symbol}&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) { rateLimit = true; continue; }
-    const ts = d['Time Series (Daily)'] as Record<string, Record<string, string>> | undefined;
-    if (!ts) continue;
-    const entries = Object.entries(ts)
-      .sort((a, b) => b[0].localeCompare(a[0]))
-      .slice(0, 30)
-      .map(([date, v]) => ({ date, close: parseFloat(v['4. close']) }));
-    const latestPrice = entries[0]?.close ?? 0;
-    const prevDay = entries[1]?.close ?? latestPrice;
-    const prevWeek = entries[6]?.close ?? latestPrice;
-    const change1d = prevDay !== 0 ? ((latestPrice - prevDay) / prevDay) * 100 : 0;
-    const change1w = prevWeek !== 0 ? ((latestPrice - prevWeek) / prevWeek) * 100 : 0;
-    sparklines.push({ symbol, series: entries, change1d, change1w, latestPrice });
-  }
-  const result = { sparklines, rateLimit };
-  _avSparkCache = result;
-  _avSparkCacheTime = now;
-  return result;
-}
-
-async function dataAvMarketStatus(): Promise<unknown> {
-  const now = Date.now();
-  if (_avMktStatusCache && now - _avMktStatusCacheTime < 900000) return _avMktStatusCache; // 15m
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const r = await fetch(`https://www.alphavantage.co/query?function=MARKET_STATUS&apikey=${apiKey}`);
-  const d = await r.json() as Record<string, unknown>;
-  if (d['Note'] || d['Information']) {
-    if (_avMktStatusCache) return _avMktStatusCache;
-    throw new Error('Alpha Vantage rate limit reached');
-  }
-  const result = { markets: (d['markets'] as unknown[]) ?? [] };
-  _avMktStatusCache = result;
-  _avMktStatusCacheTime = now;
-  return result;
-}
-
-async function dataAvMarketMovers(): Promise<unknown> {
-  const now = Date.now();
-  if (_avMoversCache && now - _avMoversCacheTime < 900000) return _avMoversCache; // 15m
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const r = await fetch(`https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${apiKey}`);
-  const d = await r.json() as Record<string, unknown>;
-  if (d['Note'] || d['Information']) {
-    if (_avMoversCache) return _avMoversCache;
-    throw new Error('Alpha Vantage rate limit reached');
-  }
-  const result = {
-    last_updated: d['last_updated'] ?? '',
-    top_gainers: (d['top_gainers'] as unknown[]) ?? [],
-    top_losers: (d['top_losers'] as unknown[]) ?? [],
-    most_actively_traded: (d['most_actively_traded'] as unknown[]) ?? [],
-  };
-  _avMoversCache = result;
-  _avMoversCacheTime = now;
-  return result;
-}
-
-async function dataAvNewsSentiment(): Promise<unknown> {
-  const now = Date.now();
-  if (_avNewsCache && now - _avNewsCacheTime < 3600000) return _avNewsCache; // 1h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const tickers = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5).join(',');
-  const tickerParam = tickers ? `&tickers=${tickers}` : '';
-  const r = await fetch(`https://www.alphavantage.co/query?function=NEWS_SENTIMENT${tickerParam}&limit=20&apikey=${apiKey}`);
-  const d = await r.json() as Record<string, unknown>;
-  if (d['Note'] || d['Information']) {
-    if (_avNewsCache) return _avNewsCache;
-    throw new Error('Alpha Vantage rate limit reached');
-  }
-  const result = { feed: (d['feed'] as unknown[]) ?? [], sentiment_score_definition: d['sentiment_score_definition'] };
-  _avNewsCache = result;
-  _avNewsCacheTime = now;
-  return result;
-}
-
-async function dataAvEarnings(): Promise<unknown> {
-  const now = Date.now();
-  if (_avEarningsCache && now - _avEarningsCacheTime < 21600000) return _avEarningsCache; // 6h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    await new Promise(r => setTimeout(r, 12000)); // rate limit
-    const r = await fetch(`https://www.alphavantage.co/query?function=EARNINGS&symbol=${symbol}&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) { continue; }
-    results.push({
-      symbol,
-      annualEarnings: ((d['annualEarnings'] as unknown[]) ?? []).slice(0, 5),
-      quarterlyEarnings: ((d['quarterlyEarnings'] as unknown[]) ?? []).slice(0, 8),
-    });
-  }
-  const result = { earnings: results };
-  _avEarningsCache = result;
-  _avEarningsCacheTime = now;
-  return result;
-}
-
-let _avCalendarCache: unknown = null;
-let _avCalendarCacheTime = 0;
-
-async function dataAvEarningsCalendar(): Promise<unknown> {
-  const now = Date.now();
-  if (_avCalendarCache && now - _avCalendarCacheTime < 86400000) return _avCalendarCache; // 24h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const r = await fetch(`https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&horizon=3month&apikey=${apiKey}`);
-  if (!r.ok) throw new Error(`AV earnings calendar error: ${r.status}`);
-  const text = await r.text();
-  // Parse CSV: first line is header, remaining lines are data
-  const lines = text.trim().split('\n');
-  const headers = lines[0]!.split(',').map(h => h.trim().replace(/^"|"$/g, ''));
-  const events = lines.slice(1).map(line => {
-    const values = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
-    const obj: Record<string, string> = {};
-    headers.forEach((h, i) => { obj[h] = values[i] ?? ''; });
-    return obj;
-  }).filter(e => e['symbol'] || e['name']);
-  const result = { events: events.slice(0, 50) };
-  _avCalendarCache = result;
-  _avCalendarCacheTime = now;
-  return result;
-}
-
-let _avFundaCache: unknown = null;
-let _avFundaCacheTime = 0;
-
-async function dataAvFundamentals(): Promise<unknown> {
-  const now = Date.now();
-  if (_avFundaCache && now - _avFundaCacheTime < 21600000) return _avFundaCache; // 6h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    await new Promise(r => setTimeout(r, 12000));
-    const r = await fetch(`https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information'] || !d['Symbol']) continue;
-    results.push({
-      symbol,
-      name: d['Name'],
-      sector: d['Sector'],
-      industry: d['Industry'],
-      exchange: d['Exchange'],
-      marketCap: d['MarketCapitalization'],
-      peRatio: d['PERatio'],
-      eps: d['EPS'],
-      dividendYield: d['DividendYield'],
-      week52High: d['52WeekHigh'],
-      week52Low: d['52WeekLow'],
-      analystTargetPrice: d['AnalystTargetPrice'],
-      beta: d['Beta'],
-      profitMargin: d['ProfitMargin'],
-    });
-  }
-  const result = { companies: results };
-  _avFundaCache = result;
-  _avFundaCacheTime = now;
-  return result;
-}
-
-let _avForexCache: unknown = null;
-let _avForexCacheTime = 0;
-
-async function dataAvForexRates(): Promise<unknown> {
-  const now = Date.now();
-  if (_avForexCache && now - _avForexCacheTime < 3600000) return _avForexCache; // 1h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const pairsEnv = process.env['AV_FOREX_PAIRS'] ?? 'EUR/USD,GBP/USD,USD/JPY';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const pairs = pairsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const results: unknown[] = [];
-  for (const pair of pairs) {
-    await new Promise(r => setTimeout(r, 12000));
-    const [from, to] = pair.split('/');
-    if (!from || !to) continue;
-    const r = await fetch(`https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=${from}&to_symbol=${to}&outputsize=compact&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) continue;
-    const ts = d['Time Series FX (Daily)'] as Record<string, Record<string, string>> | undefined;
-    if (!ts) continue;
-    const entries = Object.entries(ts)
-      .sort(([a], [b]) => b.localeCompare(a))
-      .slice(0, 30)
-      .map(([date, v]) => ({ date, close: parseFloat(v['4. close'] ?? '0') }));
-    const latest = entries[0];
-    const prev = entries[1];
-    const change = latest && prev ? latest.close - prev.close : 0;
-    const changePct = prev && prev.close ? (change / prev.close) * 100 : 0;
-    results.push({ pair, from, to, series: entries, currentRate: latest?.close ?? 0, change, changePct });
-  }
-  const result = { rates: results };
-  _avForexCache = result;
-  _avForexCacheTime = now;
-  return result;
-}
-
-let _avCommodCache: unknown = null;
-let _avCommodCacheTime = 0;
-
-async function dataAvCommodities(): Promise<unknown> {
-  const now = Date.now();
-  if (_avCommodCache && now - _avCommodCacheTime < 21600000) return _avCommodCache; // 6h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const commodities = [
-    { fn: 'WTI', name: 'WTI Crude Oil', unit: 'dollars per barrel' },
-    { fn: 'BRENT', name: 'Brent Crude Oil', unit: 'dollars per barrel' },
-    { fn: 'NATURAL_GAS', name: 'Natural Gas', unit: 'dollars per million BTU' },
-    { fn: 'COPPER', name: 'Copper', unit: 'dollars per metric ton' },
-    { fn: 'WHEAT', name: 'Wheat', unit: 'dollars per metric ton' },
-  ];
-  const results: unknown[] = [];
-  for (const c of commodities) {
-    await new Promise(r => setTimeout(r, 12000));
-    const r = await fetch(`https://www.alphavantage.co/query?function=${c.fn}&interval=monthly&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) continue;
-    const data = d['data'] as { date: string; value: string }[] | undefined;
-    if (!data || data.length < 2) continue;
-    const latest = data[0];
-    const prev = data[1];
-    const latestVal = parseFloat(latest?.value ?? '0');
-    const prevVal = parseFloat(prev?.value ?? '0');
-    const change = latestVal - prevVal;
-    const changePct = prevVal ? (change / prevVal) * 100 : 0;
-    results.push({
-      name: c.name,
-      unit: d['unit'] ?? c.unit,
-      latestDate: latest?.date ?? '',
-      latestValue: latestVal,
-      prevValue: prevVal,
-      change,
-      changePct,
-    });
-  }
-  const result = { commodities: results };
-  _avCommodCache = result;
-  _avCommodCacheTime = now;
-  return result;
-}
-
-let _avEconCache: unknown = null;
-let _avEconCacheTime = 0;
-
-async function dataAvEconomicIndicators(): Promise<unknown> {
-  const now = Date.now();
-  if (_avEconCache && now - _avEconCacheTime < 86400000) return _avEconCache; // 24h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const indicators = [
-    { fn: 'REAL_GDP', params: 'interval=annual', name: 'Real GDP', unit: 'billions of dollars' },
-    { fn: 'INFLATION', params: '', name: 'Inflation (CPI YoY)', unit: 'percent' },
-    { fn: 'UNEMPLOYMENT', params: '', name: 'Unemployment Rate', unit: 'percent' },
-    { fn: 'CPI', params: 'interval=monthly', name: 'Consumer Price Index', unit: 'index' },
-  ];
-  const results: unknown[] = [];
-  for (const ind of indicators) {
-    await new Promise(r => setTimeout(r, 12000));
-    const params = ind.params ? `&${ind.params}` : '';
-    const r = await fetch(`https://www.alphavantage.co/query?function=${ind.fn}${params}&apikey=${apiKey}`);
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) continue;
-    const data = d['data'] as { date: string; value: string }[] | undefined;
-    if (!data || data.length < 2) continue;
-    const latest = data[0];
-    const prev = data[1];
-    const latestVal = parseFloat(latest?.value ?? '0');
-    const prevVal = parseFloat(prev?.value ?? '0');
-    results.push({
-      name: ind.name,
-      unit: d['unit'] ?? ind.unit,
-      interval: d['interval'] ?? '',
-      latestDate: latest?.date ?? '',
-      latestValue: latestVal,
-      prevDate: prev?.date ?? '',
-      prevValue: prevVal,
-    });
-  }
-  const result = { indicators: results };
-  _avEconCache = result;
-  _avEconCacheTime = now;
-  return result;
-}
-
-let _avInsiderCache: unknown = null;
-let _avInsiderCacheTime = 0;
-
-async function dataAvInsiderTransactions(): Promise<unknown> {
-  const now = Date.now();
-  if (_avInsiderCache && now - _avInsiderCacheTime < 86400000) return _avInsiderCache; // 24h
-  const apiKey = process.env['ALPHA_VANTAGE_KEY'];
-  const symbolsEnv = process.env['AV_SYMBOLS'] ?? '';
-  if (!apiKey) throw new Error('ALPHA_VANTAGE_KEY not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5).join(',');
-  try {
-    const r = await fetch(`https://www.alphavantage.co/query?function=ANALYTICS_FIXED_WINDOW&SYMBOLS=${symbols}&RANGE=6month&OHLC=close&CALCULATIONS=PERCENT_CHANGE&apikey=${apiKey}`);
-    if (!r.ok) {
-      const result = { transactions: [], note: 'This endpoint requires Alpha Vantage Premium.' };
-      _avInsiderCache = result;
-      _avInsiderCacheTime = now;
-      return result;
-    }
-    const d = await r.json() as Record<string, unknown>;
-    if (d['Note'] || d['Information']) {
-      const result = { transactions: [], note: String(d['Note'] ?? d['Information'] ?? 'Premium endpoint required.') };
-      _avInsiderCache = result;
-      _avInsiderCacheTime = now;
-      return result;
-    }
-    const payload = d['payload'] as unknown[] | undefined;
-    const result = { transactions: payload ?? [], note: '' };
-    _avInsiderCache = result;
-    _avInsiderCacheTime = now;
-    return result;
-  } catch {
-    return { transactions: [], note: 'Failed to fetch insider data.' };
-  }
-}
-
-// ── CoinGecko ─────────────────────────────────────────────────────────────────
-let _cgCache: unknown = null;
-let _cgCacheTime = 0;
-let _cgGlobalCache: unknown = null;
-let _cgGlobalCacheTime = 0;
-
-async function dataCoinGeckoMarkets(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgCache && now - _cgCacheTime < 300000) return _cgCache; // 5m cache
-  const coinsEnv = process.env['COINGECKO_COINS'] ?? 'bitcoin,ethereum,solana,cardano,polkadot';
-  const coins = coinsEnv.split(',').map(s => s.trim()).filter(Boolean).join(',');
-  const r = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${coins}&order=market_cap_desc&per_page=20&page=1&sparkline=false`);
-  if (r.status === 429) {
-    if (_cgCache) return _cgCache; // fallback to stale cache
-    throw new Error('CoinGecko rate limit reached');
-  }
-  const data = await r.json() as unknown[];
-  const result = { coins: data };
-  _cgCache = result;
-  _cgCacheTime = now;
-  return result;
-}
-
-async function dataCoinGeckoGlobal(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgGlobalCache && now - _cgGlobalCacheTime < 600000) return _cgGlobalCache; // 10m cache
-  const r = await fetch('https://api.coingecko.com/api/v3/global');
-  if (r.status === 429) {
-    if (_cgGlobalCache) return _cgGlobalCache;
-    throw new Error('CoinGecko rate limit reached');
-  }
-  const d = await r.json() as { data?: Record<string, unknown> };
-  const result = { global: d.data ?? {} };
-  _cgGlobalCache = result;
-  _cgGlobalCacheTime = now;
-  return result;
-}
-
-let _cgTrendingCache: unknown = null;
-let _cgTrendingCacheTime = 0;
-
-async function dataCoinGeckoTrending(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgTrendingCache && now - _cgTrendingCacheTime < 900000) return _cgTrendingCache; // 15m
-  const r = await fetch('https://api.coingecko.com/api/v3/search/trending');
-  if (r.status === 429) {
-    if (_cgTrendingCache) return _cgTrendingCache;
-    throw new Error('CoinGecko rate limit');
-  }
-  if (!r.ok) throw new Error(`CoinGecko trending error: ${r.status}`);
-  const d = await r.json() as { coins?: { item: Record<string, unknown> }[] };
-  const trending = (d.coins ?? []).slice(0, 7).map((c) => c.item);
-  const result = { trending };
-  _cgTrendingCache = result;
-  _cgTrendingCacheTime = now;
-  return result;
-}
-
-let _cgChartCache: unknown = null;
-let _cgChartCacheTime = 0;
-
-async function dataCoinGeckoPriceChart(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgChartCache && now - _cgChartCacheTime < 600000) return _cgChartCache; // 10m
-  const coinsEnv = process.env['COINGECKO_COINS'] ?? 'bitcoin,ethereum';
-  const coins = coinsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const charts: unknown[] = [];
-  for (const coinId of coins) {
-    if (charts.length > 0) await new Promise(r => setTimeout(r, 2000)); // rate limit delay
-    const r = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=7`);
-    if (r.status === 429) { if (_cgChartCache) return _cgChartCache; break; }
-    if (!r.ok) continue;
-    const d = await r.json() as { prices?: [number, number][] };
-    const prices = (d.prices ?? []).map(([ts, price]) => ({ ts, price }));
-    charts.push({ coinId, prices });
-  }
-  const result = { charts };
-  _cgChartCache = result;
-  _cgChartCacheTime = now;
-  return result;
-}
-
-let _cgDefiCache: unknown = null;
-let _cgDefiCacheTime = 0;
-
-async function dataCoinGeckoDefi(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgDefiCache && now - _cgDefiCacheTime < 600000) return _cgDefiCache; // 10m
-  const r = await fetch('https://api.coingecko.com/api/v3/global/decentralized_finance_defi');
-  if (r.status === 429) { if (_cgDefiCache) return _cgDefiCache; throw new Error('CoinGecko rate limit'); }
-  if (!r.ok) throw new Error(`CoinGecko DeFi error: ${r.status}`);
-  const d = await r.json() as { data?: Record<string, unknown> };
-  const result = { defi: d.data ?? {} };
-  _cgDefiCache = result;
-  _cgDefiCacheTime = now;
-  return result;
-}
-
-let _cgCatCache: unknown = null;
-let _cgCatCacheTime = 0;
-
-async function dataCoinGeckoCategories(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgCatCache && now - _cgCatCacheTime < 1800000) return _cgCatCache; // 30m
-  const r = await fetch('https://api.coingecko.com/api/v3/coins/categories?order=market_cap_desc');
-  if (r.status === 429) { if (_cgCatCache) return _cgCatCache; throw new Error('CoinGecko rate limit'); }
-  if (!r.ok) throw new Error(`CoinGecko categories error: ${r.status}`);
-  const d = await r.json() as unknown[];
-  const result = { categories: d.slice(0, 20) };
-  _cgCatCache = result;
-  _cgCatCacheTime = now;
-  return result;
-}
-
-let _cgExchCache: unknown = null;
-let _cgExchCacheTime = 0;
-
-async function dataCoinGeckoExchanges(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgExchCache && now - _cgExchCacheTime < 1800000) return _cgExchCache; // 30m
-  const r = await fetch('https://api.coingecko.com/api/v3/exchanges?per_page=10&page=1');
-  if (r.status === 429) { if (_cgExchCache) return _cgExchCache; throw new Error('CoinGecko rate limit'); }
-  if (!r.ok) throw new Error(`CoinGecko exchanges error: ${r.status}`);
-  const d = await r.json() as unknown[];
-  const result = { exchanges: d.slice(0, 10) };
-  _cgExchCache = result;
-  _cgExchCacheTime = now;
-  return result;
-}
-
-let _cgDetailCache: unknown = null;
-let _cgDetailCacheTime = 0;
-
-async function dataCoinGeckoCoinDetail(): Promise<unknown> {
-  const now = Date.now();
-  if (_cgDetailCache && now - _cgDetailCacheTime < 300000) return _cgDetailCache; // 5m
-  const coinsEnv = process.env['COINGECKO_COINS'] ?? 'bitcoin';
-  const coins = coinsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const details: unknown[] = [];
-  for (const coinId of coins) {
-    if (details.length > 0) await new Promise(r => setTimeout(r, 2000));
-    const r = await fetch(`https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`);
-    if (r.status === 429) { if (_cgDetailCache) return _cgDetailCache; break; }
-    if (!r.ok) continue;
-    const d = await r.json() as Record<string, unknown>;
-    const mktData = d['market_data'] as Record<string, unknown> | undefined;
-    details.push({
-      id: d['id'],
-      name: d['name'],
-      symbol: d['symbol'],
-      description: (d['description'] as Record<string, string> | undefined)?.['en']?.slice(0, 200) ?? '',
-      image: (d['image'] as Record<string, string> | undefined)?.['small'] ?? '',
-      currentPrice: (mktData?.['current_price'] as Record<string, number> | undefined)?.['usd'] ?? 0,
-      marketCap: (mktData?.['market_cap'] as Record<string, number> | undefined)?.['usd'] ?? 0,
-      priceChange24h: mktData?.['price_change_percentage_24h'] ?? 0,
-      high24h: (mktData?.['high_24h'] as Record<string, number> | undefined)?.['usd'] ?? 0,
-      low24h: (mktData?.['low_24h'] as Record<string, number> | undefined)?.['usd'] ?? 0,
-      ath: (mktData?.['ath'] as Record<string, number> | undefined)?.['usd'] ?? 0,
-      athDate: (mktData?.['ath_date'] as Record<string, string> | undefined)?.['usd'] ?? '',
-      rank: d['market_cap_rank'] ?? 0,
-    });
-  }
-  const result = { details };
-  _cgDetailCache = result;
-  _cgDetailCacheTime = now;
-  return result;
-}
-
-// ── Finnhub ───────────────────────────────────────────────────────────────────
-async function dataFinnhubQuotes(): Promise<unknown> {
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 10);
-  const quotes = await Promise.all(
-    symbols.map(symbol =>
-      fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${token}`)
-        .then(r => r.json())
-        .then((q: unknown) => ({ ...(q as Record<string, unknown>), symbol }))
-    )
-  );
-  return { quotes };
-}
-
-async function dataFinnhubNews(): Promise<unknown> {
-  const token = process.env['FINNHUB_TOKEN'];
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const category = process.env['FH_NEWS_CATEGORY'] ?? 'general';
-  const r = await fetch(`https://finnhub.io/api/v1/news?category=${category}&token=${token}`);
-  if (!r.ok) throw new Error(`Finnhub news error: ${r.status}`);
-  const items = await r.json() as unknown[];
-  return { news: (items as unknown[]).slice(0, 30) };
-}
-
-let _fhCompanyNewsCache: unknown = null;
-let _fhCompanyNewsCacheTime = 0;
-
-async function dataFinnhubCompanyNews(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhCompanyNewsCache && now - _fhCompanyNewsCacheTime < 300000) return _fhCompanyNewsCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const toDate = new Date().toISOString().slice(0, 10);
-  const fromDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const allNews: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromDate}&to=${toDate}&token=${token}`);
-    if (!r.ok) continue;
-    const news = await r.json() as unknown[];
-    allNews.push(...news.slice(0, 5));
-  }
-  allNews.sort((a, b) => ((b as Record<string, number>)['datetime'] ?? 0) - ((a as Record<string, number>)['datetime'] ?? 0));
-  const result = { news: allNews.slice(0, 30) };
-  _fhCompanyNewsCache = result;
-  _fhCompanyNewsCacheTime = now;
-  return result;
-}
-
-let _fhMktNewsCache: unknown = null;
-let _fhMktNewsCacheTime = 0;
-
-async function dataFinnhubMarketNews(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhMktNewsCache && now - _fhMktNewsCacheTime < 300000) return _fhMktNewsCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const categories = ['general', 'forex', 'crypto'];
-  const byCategory: Record<string, unknown[]> = {};
-  for (const cat of categories) {
-    const r = await fetch(`https://finnhub.io/api/v1/news?category=${cat}&minId=0&token=${token}`);
-    if (!r.ok) continue;
-    const news = await r.json() as unknown[];
-    byCategory[cat] = news.slice(0, 10);
-  }
-  const result = { byCategory };
-  _fhMktNewsCache = result;
-  _fhMktNewsCacheTime = now;
-  return result;
-}
-
-let _fhEarnCalCache: unknown = null;
-let _fhEarnCalCacheTime = 0;
-
-async function dataFinnhubEarningsCalendar(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhEarnCalCache && now - _fhEarnCalCacheTime < 3600000) return _fhEarnCalCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const today = new Date().toISOString().slice(0, 10);
-  const nextMonth = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const r = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${today}&to=${nextMonth}&token=${token}`);
-  if (!r.ok) throw new Error(`Finnhub earnings calendar error: ${r.status}`);
-  const d = await r.json() as { earningsCalendar?: unknown[] };
-  const result = { calendar: (d.earningsCalendar ?? []).slice(0, 30) };
-  _fhEarnCalCache = result;
-  _fhEarnCalCacheTime = now;
-  return result;
-}
-
-let _fhEarnSurpCache: unknown = null;
-let _fhEarnSurpCacheTime = 0;
-
-async function dataFinnhubEarningsSurprises(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhEarnSurpCache && now - _fhEarnSurpCacheTime < 3600000) return _fhEarnSurpCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/earnings?symbol=${symbol}&limit=4&token=${token}`);
-    if (!r.ok) continue;
-    const data = await r.json() as unknown[];
-    if (Array.isArray(data) && data.length > 0) results.push({ symbol, quarters: data.slice(0, 4) });
-  }
-  const result = { surprises: results };
-  _fhEarnSurpCache = result;
-  _fhEarnSurpCacheTime = now;
-  return result;
-}
-
-let _fhAnalysisCache: unknown = null;
-let _fhAnalysisCacheTime = 0;
-
-async function dataFinnhubAnalystConsensus(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhAnalysisCache && now - _fhAnalysisCacheTime < 3600000) return _fhAnalysisCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${symbol}&token=${token}`);
-    if (!r.ok) continue;
-    const data = await r.json() as unknown[];
-    if (Array.isArray(data) && data.length > 0) results.push({ symbol, recommendation: data[0] });
-  }
-  const result = { consensus: results };
-  _fhAnalysisCache = result;
-  _fhAnalysisCacheTime = now;
-  return result;
-}
-
-let _fhFundaCache: unknown = null;
-let _fhFundaCacheTime = 0;
-
-async function dataFinnhubFundamentals(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhFundaCache && now - _fhFundaCacheTime < 3600000) return _fhFundaCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${symbol}&metric=all&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as { metric?: Record<string, unknown> };
-    if (d.metric) {
-      const m = d.metric;
-      results.push({
-        symbol,
-        peNormalizedAnnual: m['peNormalizedAnnual'] ?? null,
-        pbAnnual: m['pbAnnual'] ?? null,
-        psTTM: m['psTTM'] ?? null,
-        epsBasicExclExtraItemsAnnual: m['epsBasicExclExtraItemsAnnual'] ?? null,
-        roaRfy: m['roaRfy'] ?? null,
-        roeRfy: m['roeRfy'] ?? null,
-        debtEquityAnnual: m['debtEquityAnnual'] ?? null,
-        dividendYieldIndicatedAnnual: m['dividendYieldIndicatedAnnual'] ?? null,
-        '52WeekHigh': m['52WeekHigh'] ?? null,
-        '52WeekLow': m['52WeekLow'] ?? null,
-        beta: m['beta'] ?? null,
-        marketCapitalization: m['marketCapitalization'] ?? null,
-      });
-    }
-  }
-  const result = { fundamentals: results };
-  _fhFundaCache = result;
-  _fhFundaCacheTime = now;
-  return result;
-}
-
-let _fhMktStatusCache: unknown = null;
-let _fhMktStatusCacheTime = 0;
-
-async function dataFinnhubMarketStatus(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhMktStatusCache && now - _fhMktStatusCacheTime < 300000) return _fhMktStatusCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const exchanges = ['US', 'LSE', 'TSX', 'EURONEXT'];
-  const statuses: unknown[] = [];
-  for (const exchange of exchanges) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/market-status?exchange=${exchange}&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as Record<string, unknown>;
-    statuses.push({ exchange, ...d });
-  }
-  const result = { statuses };
-  _fhMktStatusCache = result;
-  _fhMktStatusCacheTime = now;
-  return result;
-}
-
-let _fhInsiderTxCache: unknown = null;
-let _fhInsiderTxCacheTime = 0;
-
-async function dataFinnhubInsiderTransactions(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhInsiderTxCache && now - _fhInsiderTxCacheTime < 3600000) return _fhInsiderTxCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/insider-transactions?symbol=${symbol}&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as { data?: unknown[] };
-    const txList = (d.data ?? []).slice(0, 10);
-    results.push({ symbol, transactions: txList });
-  }
-  const result = { symbols: results };
-  _fhInsiderTxCache = result;
-  _fhInsiderTxCacheTime = now;
-  return result;
-}
-
-let _fhInsiderSentCache: unknown = null;
-let _fhInsiderSentCacheTime = 0;
-
-async function dataFinnhubInsiderSentiment(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhInsiderSentCache && now - _fhInsiderSentCacheTime < 3600000) return _fhInsiderSentCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const toDate = new Date().toISOString().slice(0, 10);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/insider-sentiment?symbol=${symbol}&from=${fromDate}&to=${toDate}&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as { data?: unknown[]; symbol?: string };
-    const dataArr = d.data ?? [];
-    const latest = dataArr.length > 0 ? dataArr[dataArr.length - 1] : null;
-    results.push({ symbol, data: dataArr, latest });
-  }
-  const result = { sentiments: results };
-  _fhInsiderSentCache = result;
-  _fhInsiderSentCacheTime = now;
-  return result;
-}
-
-let _fhIpoCache: unknown = null;
-let _fhIpoCacheTime = 0;
-
-async function dataFinnhubIpoCalendar(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhIpoCache && now - _fhIpoCacheTime < 3600000) return _fhIpoCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const today = new Date().toISOString().slice(0, 10);
-  const nextMonth = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const r = await fetch(`https://finnhub.io/api/v1/calendar/ipo?from=${today}&to=${nextMonth}&token=${token}`);
-  if (!r.ok) throw new Error(`Finnhub IPO calendar error: ${r.status}`);
-  const d = await r.json() as { ipoCalendar?: unknown[] };
-  const result = { ipos: (d.ipoCalendar ?? []).slice(0, 20) };
-  _fhIpoCache = result;
-  _fhIpoCacheTime = now;
-  return result;
-}
-
-let _fhFilingsCache: unknown = null;
-let _fhFilingsCacheTime = 0;
-
-async function dataFinnhubSecFilings(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhFilingsCache && now - _fhFilingsCacheTime < 3600000) return _fhFilingsCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/filings?symbol=${symbol}&form=10-K,10-Q,8-K&limit=5&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as unknown[];
-    results.push({ symbol, filings: d.slice(0, 5) });
-  }
-  const result = { symbols: results };
-  _fhFilingsCache = result;
-  _fhFilingsCacheTime = now;
-  return result;
-}
-
-let _fhProfileCache: unknown = null;
-let _fhProfileCacheTime = 0;
-
-async function dataFinnhubCompanyProfile(): Promise<unknown> {
-  const now = Date.now();
-  if (_fhProfileCache && now - _fhProfileCacheTime < 21600000) return _fhProfileCache;
-  const token = process.env['FINNHUB_TOKEN'];
-  const symbolsEnv = process.env['FH_SYMBOLS'] ?? '';
-  if (!token) throw new Error('FINNHUB_TOKEN not configured');
-  const symbols = symbolsEnv.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-  const results: unknown[] = [];
-  for (const symbol of symbols) {
-    const r = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${symbol}&token=${token}`);
-    if (!r.ok) continue;
-    const d = await r.json() as Record<string, unknown>;
-    if (d['ticker']) results.push(d);
-  }
-  const result = { profiles: results };
-  _fhProfileCache = result;
-  _fhProfileCacheTime = now;
-  return result;
-}
-
-// ── Plaid ─────────────────────────────────────────────────────────────────────
-async function dataPlaidAccounts(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const r = await fetch(`${baseUrl}/accounts/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-  });
-  const d = await r.json() as { accounts?: unknown[] };
-  return { accounts: d.accounts ?? [] };
-}
-
-async function dataPlaidTransactions(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const endDate = new Date().toISOString().slice(0, 10);
-  const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const r = await fetch(`${baseUrl}/transactions/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken, start_date: startDate, end_date: endDate, options: { count: 50, offset: 0 } }),
-  });
-  const d = await r.json() as { transactions?: unknown[] };
-  return { transactions: d.transactions ?? [] };
-}
-
-// ── Plaid Extended ────────────────────────────────────────────────────────────
-let _plaidHoldingsCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidInvestmentPortfolio(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidHoldingsCache && Date.now() - _plaidHoldingsCache.ts < 600_000) return _plaidHoldingsCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const r = await fetch(`${baseUrl}/investments/holdings/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-  });
-  const d = await r.json() as { holdings?: { account_id: string; security_id: string; quantity: number; institution_price: number; institution_value: number; cost_basis?: number }[]; securities?: { security_id: string; name: string; ticker_symbol?: string; type?: string; close_price?: number }[]; accounts?: unknown[] };
-  const holdings = d.holdings ?? [];
-  const securitiesMap = new Map((d.securities ?? []).map(s => [s.security_id, s]));
-  const enriched = holdings.map(h => {
-    const sec = securitiesMap.get(h.security_id);
-    return {
-      account_id: h.account_id,
-      security_id: h.security_id,
-      name: sec?.name ?? h.security_id,
-      ticker_symbol: sec?.ticker_symbol ?? '',
-      type: sec?.type ?? '',
-      quantity: h.quantity,
-      institution_price: h.institution_price,
-      institution_value: h.institution_value,
-      cost_basis: h.cost_basis ?? 0,
-      unrealized_gain: h.institution_value - (h.cost_basis ?? 0),
-    };
-  }).sort((a, b) => b.institution_value - a.institution_value);
-  const data = { holdings: enriched };
-  _plaidHoldingsCache = { data, ts: Date.now() };
-  return data;
-}
-
-let _plaidInvTxCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidInvestmentTransactions(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidInvTxCache && Date.now() - _plaidInvTxCache.ts < 600_000) return _plaidInvTxCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const endDate = new Date().toISOString().slice(0, 10);
-  const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const r = await fetch(`${baseUrl}/investments/transactions/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken, start_date: startDate, end_date: endDate }),
-  });
-  const d = await r.json() as { investment_transactions?: { investment_transaction_id: string; account_id: string; security_id?: string; date: string; name: string; quantity: number; amount: number; fees?: number; type: string; subtype: string }[]; securities?: { security_id: string; name: string; ticker_symbol?: string }[] };
-  const securitiesMap = new Map((d.securities ?? []).map(s => [s.security_id, s]));
-  const txs = (d.investment_transactions ?? []).map(tx => ({
-    ...tx,
-    ticker_symbol: securitiesMap.get(tx.security_id ?? '')?.ticker_symbol ?? '',
-  })).sort((a, b) => b.date.localeCompare(a.date));
-  const data = { transactions: txs };
-  _plaidInvTxCache = { data, ts: Date.now() };
-  return data;
-}
-
-let _plaidLiabCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidLiabilities(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidLiabCache && Date.now() - _plaidLiabCache.ts < 1_800_000) return _plaidLiabCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const r = await fetch(`${baseUrl}/liabilities/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-  });
-  const d = await r.json() as { liabilities?: { credit?: { account_id: string; balances?: { current?: number } }[]; mortgage?: { account_id: string; balances?: { current?: number } }[]; student?: { account_id: string; balances?: { current?: number } }[] }; accounts?: { account_id: string; name: string; balances?: { current?: number; limit?: number } }[] };
-  const liab = d.liabilities ?? {};
-  const creditTotal = (liab.credit ?? []).reduce((s, c) => s + (c.balances?.current ?? 0), 0);
-  const mortgageTotal = (liab.mortgage ?? []).reduce((s, m) => s + (m.balances?.current ?? 0), 0);
-  const studentTotal = (liab.student ?? []).reduce((s, st) => s + (st.balances?.current ?? 0), 0);
-  const totalOwed = creditTotal + mortgageTotal + studentTotal;
-  const accounts = (d.accounts ?? []).map(a => ({ account_id: a.account_id, name: a.name, balance: a.balances?.current ?? 0 }));
-  const data = { totalOwed, byType: { credit: creditTotal, mortgage: mortgageTotal, student: studentTotal }, accounts };
-  _plaidLiabCache = { data, ts: Date.now() };
-  return data;
-}
-
-let _plaidCCCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidCreditCards(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidCCCache && Date.now() - _plaidCCCache.ts < 1_800_000) return _plaidCCCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const r = await fetch(`${baseUrl}/liabilities/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-  });
-  const d = await r.json() as { liabilities?: { credit?: { account_id: string; balances?: { current?: number; limit?: number }; last_statement_balance?: number; last_payment_date?: string; last_payment_amount?: number; minimum_payment_amount?: number; next_payment_due_date?: string; is_overdue?: boolean }[] }; accounts?: { account_id: string; name: string }[] };
-  const accountNames = new Map((d.accounts ?? []).map(a => [a.account_id, a.name]));
-  const cards = (d.liabilities?.credit ?? []).map(cc => {
-    const current = cc.balances?.current ?? 0;
-    const limit = cc.balances?.limit ?? 0;
-    const utilization = limit > 0 ? Math.round((current / limit) * 100) : 0;
-    return {
-      account_id: cc.account_id,
-      name: accountNames.get(cc.account_id) ?? cc.account_id,
-      current,
-      limit,
-      utilization,
-      last_statement_balance: cc.last_statement_balance ?? 0,
-      last_payment_date: cc.last_payment_date ?? '',
-      last_payment_amount: cc.last_payment_amount ?? 0,
-      minimum_payment_amount: cc.minimum_payment_amount ?? 0,
-      next_payment_due_date: cc.next_payment_due_date ?? '',
-      is_overdue: cc.is_overdue ?? false,
-    };
-  });
-  const data = { cards };
-  _plaidCCCache = { data, ts: Date.now() };
-  return data;
-}
-
-let _plaidMortgCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidMortgage(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidMortgCache && Date.now() - _plaidMortgCache.ts < 3_600_000) return _plaidMortgCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  const r = await fetch(`${baseUrl}/liabilities/get`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-  });
-  const d = await r.json() as { liabilities?: { mortgage?: { account_id: string; origination_principal_amount?: number; outstanding_principal_balance?: number; last_payment_amount?: number; last_payment_date?: string; current_late_fee?: number; maturity_date?: string; interest_rate?: { percentage?: number; type?: string }; next_payment_due_date?: string; next_monthly_payment?: number; property_address?: { city?: string; state?: string } }[] } };
-  const mortgages = (d.liabilities?.mortgage ?? []).map(m => ({
-    account_id: m.account_id,
-    origination_principal_amount: m.origination_principal_amount ?? 0,
-    outstanding_principal_balance: m.outstanding_principal_balance ?? 0,
-    last_payment_amount: m.last_payment_amount ?? 0,
-    last_payment_date: m.last_payment_date ?? '',
-    current_late_fee: m.current_late_fee ?? 0,
-    maturity_date: m.maturity_date ?? '',
-    interest_rate_percentage: m.interest_rate?.percentage ?? 0,
-    interest_rate_type: m.interest_rate?.type ?? '',
-    next_payment_due_date: m.next_payment_due_date ?? '',
-    next_monthly_payment: m.next_monthly_payment ?? 0,
-    city: m.property_address?.city ?? '',
-    state: m.property_address?.state ?? '',
-  }));
-  const data = { mortgages };
-  _plaidMortgCache = { data, ts: Date.now() };
-  return data;
-}
-
-let _plaidStmtCache: { data: unknown; ts: number } | null = null;
-async function dataPlaidStatements(): Promise<unknown> {
-  const accessToken = process.env['PLAID_ACCESS_TOKEN'];
-  const clientId = process.env['PLAID_CLIENT_ID'];
-  const secret = process.env['PLAID_SECRET'];
-  const env = process.env['PLAID_ENV'] ?? 'sandbox';
-  if (!accessToken || !clientId || !secret) throw new Error('PLAID_ACCESS_TOKEN, PLAID_CLIENT_ID, or PLAID_SECRET not configured');
-  if (_plaidStmtCache && Date.now() - _plaidStmtCache.ts < 3_600_000) return _plaidStmtCache.data;
-  const baseUrl = env === 'production' ? 'https://production.plaid.com' : env === 'development' ? 'https://development.plaid.com' : 'https://sandbox.plaid.com';
-  try {
-    const r = await fetch(`${baseUrl}/statements/list`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client_id: clientId, secret, access_token: accessToken }),
-    });
-    if (!r.ok) {
-      const data = { accounts: [], note: 'Statements not available in this Plaid environment.' };
-      _plaidStmtCache = { data, ts: Date.now() };
-      return data;
-    }
-    const d = await r.json() as { accounts?: { account_id: string; account_name: string; statements?: { statement_id: string; month: number; year: number; pdf_url?: string }[] }[] };
-    const data = { accounts: d.accounts ?? [], note: '' };
-    _plaidStmtCache = { data, ts: Date.now() };
-    return data;
-  } catch {
-    const data = { accounts: [], note: 'Statements not available in sandbox mode.' };
-    _plaidStmtCache = { data, ts: Date.now() };
-    return data;
-  }
-}
-
-// ── HIBP ──────────────────────────────────────────────────────────────────────
-async function dataHibpBreaches(): Promise<unknown> {
-  const apiKey = process.env['HIBP_API_KEY'];
-  const emailsEnv = process.env['HIBP_EMAILS'];
-  if (!apiKey || !emailsEnv) throw new Error('HIBP_API_KEY or HIBP_EMAILS not configured');
-  const emails = emailsEnv.split(',').map(s => s.trim()).filter(Boolean);
-  const results: unknown[] = [];
-  for (const email of emails) {
-    await new Promise(r => setTimeout(r, 1600)); // 1.6s between requests
-    const r = await fetch(`https://haveibeenpwned.com/api/v3/breachedaccount/${encodeURIComponent(email)}?truncateResponse=false`, {
-      headers: { 'hibp-api-key': apiKey, 'User-Agent': 'TWM-Dashboard' },
-    });
-    if (r.status === 404) { results.push({ email, breaches: [] }); continue; }
-    if (!r.ok) continue;
-    const breaches = await r.json() as unknown[];
-    results.push({ email, breaches });
-  }
-  return { results };
-}
-
-// ── VirusTotal ────────────────────────────────────────────────────────────────
-async function dataVirusTotalAnalyses(): Promise<unknown> {
-  const apiKey = process.env['VIRUSTOTAL_API_KEY'];
-  const domainsEnv = process.env['VT_DOMAINS'];
-  if (!apiKey || !domainsEnv) throw new Error('VIRUSTOTAL_API_KEY or VT_DOMAINS not configured');
-  const domains = domainsEnv.split(',').map(s => s.trim()).filter(Boolean);
-  const results: unknown[] = [];
-  for (const domain of domains) {
-    await new Promise(r => setTimeout(r, 15000)); // 15s between requests (4/min limit)
-    const r = await fetch(`https://www.virustotal.com/api/v3/domains/${domain}`, {
-      headers: { 'x-apikey': apiKey },
-    });
-    if (!r.ok) continue;
-    const d = await r.json() as { data?: { attributes?: Record<string, unknown> } };
-    const attrs = d.data?.attributes ?? {};
-    results.push({
-      domain,
-      stats: attrs['last_analysis_stats'] ?? { harmless: 0, malicious: 0, suspicious: 0, undetected: 0, timeout: 0 },
-      reputation: attrs['reputation'] ?? 0,
-      last_analysis_date: attrs['last_analysis_date'] ?? 0,
-      categories: attrs['categories'],
-      country: attrs['country'],
-    });
-  }
-  return { results };
-}
-
-// ── Shodan ────────────────────────────────────────────────────────────────────
-async function dataShodanSearch(): Promise<unknown> {
-  const apiKey = process.env['SHODAN_API_KEY'];
-  const query = process.env['SHODAN_QUERY'] ?? 'apache';
-  if (!apiKey) throw new Error('SHODAN_API_KEY not configured');
-  const r = await fetch(`https://api.shodan.io/shodan/host/search?key=${apiKey}&query=${encodeURIComponent(query)}&minify=true`);
-  const d = await r.json() as { matches?: unknown[]; total?: number };
-  return { results: { matches: d.matches ?? [], total: d.total ?? 0 } };
-}
-
-// ── WooCommerce ───────────────────────────────────────────────────────────────
-async function dataWooCommerceOrders(): Promise<unknown> {
-  const baseUrl = process.env['WC_BASE_URL'];
-  const consumerKey = process.env['WC_CONSUMER_KEY'];
-  const consumerSecret = process.env['WC_CONSUMER_SECRET'];
-  if (!baseUrl || !consumerKey || !consumerSecret) throw new Error('WC_BASE_URL, WC_CONSUMER_KEY, or WC_CONSUMER_SECRET not configured');
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-  const r = await fetch(`${baseUrl}/wp-json/wc/v3/orders?per_page=25&orderby=date&order=desc`, {
-    headers: { Authorization: `Basic ${auth}` },
-  });
-  const orders = await r.json() as unknown[];
-  return { orders };
-}
-
-async function dataWooSalesSummary(): Promise<unknown> {
-  const baseUrl = process.env['WC_BASE_URL'];
-  const consumerKey = process.env['WC_CONSUMER_KEY'];
-  const consumerSecret = process.env['WC_CONSUMER_SECRET'];
-  if (!baseUrl || !consumerKey || !consumerSecret) throw new Error('WC_BASE_URL, WC_CONSUMER_KEY, or WC_CONSUMER_SECRET not configured');
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-  const endDate = new Date().toISOString().slice(0, 10);
-  const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const r = await fetch(`${baseUrl}/wp-json/wc/v3/reports/sales?date_min=${startDate}&date_max=${endDate}`, {
-    headers: { Authorization: `Basic ${auth}` },
-  });
-  const d = await r.json() as unknown[];
-  return { summary: Array.isArray(d) ? (d[0] ?? {}) : {} };
-}
-
-async function dataWooTopSellers(): Promise<unknown> {
-  const baseUrl = process.env['WC_BASE_URL'];
-  const consumerKey = process.env['WC_CONSUMER_KEY'];
-  const consumerSecret = process.env['WC_CONSUMER_SECRET'];
-  if (!baseUrl || !consumerKey || !consumerSecret) throw new Error('WC_BASE_URL, WC_CONSUMER_KEY, or WC_CONSUMER_SECRET not configured');
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-  const r = await fetch(`${baseUrl}/wp-json/wc/v3/reports/top_sellers?period=month&number=20`, {
-    headers: { Authorization: `Basic ${auth}` },
-  });
-  const d = await r.json() as unknown[];
-  return { sellers: Array.isArray(d) ? d : [] };
-}
-
-// ── Shopify ───────────────────────────────────────────────────────────────────
-async function dataShopifyOrders(): Promise<unknown> {
-  const shop = process.env['SHOPIFY_SHOP'];
-  const accessToken = process.env['SHOPIFY_ACCESS_TOKEN'];
-  if (!shop || !accessToken) throw new Error('SHOPIFY_SHOP or SHOPIFY_ACCESS_TOKEN not configured');
-  const r = await fetch(`https://${shop}/admin/api/2024-07/orders.json?limit=25&status=any`, {
-    headers: { 'X-Shopify-Access-Token': accessToken },
-  });
-  const d = await r.json() as { orders?: unknown[] };
-  return { orders: d.orders ?? [] };
-}
-
-async function dataShopifyProducts(): Promise<unknown> {
-  const shop = process.env['SHOPIFY_SHOP'];
-  const accessToken = process.env['SHOPIFY_ACCESS_TOKEN'];
-  if (!shop || !accessToken) throw new Error('SHOPIFY_SHOP or SHOPIFY_ACCESS_TOKEN not configured');
-  const r = await fetch(`https://${shop}/admin/api/2024-07/products.json?limit=25&status=active`, {
-    headers: { 'X-Shopify-Access-Token': accessToken },
-  });
-  const d = await r.json() as { products?: unknown[] };
-  return { products: d.products ?? [] };
-}
-
-// ── Reddit ────────────────────────────────────────────────────────────────────
-async function dataRedditPosts(): Promise<unknown> {
-  const subredditsEnv = process.env['REDDIT_SUBREDDITS'];
-  const keywordsEnv = process.env['REDDIT_KEYWORDS'];
-  if (!subredditsEnv && !keywordsEnv) throw new Error('REDDIT_SUBREDDITS or REDDIT_KEYWORDS not configured');
-  const headers = { 'User-Agent': 'TWM-Dashboard/1.0' };
-  const allPosts: unknown[] = [];
-  if (subredditsEnv) {
-    const subreddits = subredditsEnv.split(',').map(s => s.trim()).filter(Boolean);
-    for (const sub of subreddits.slice(0, 3)) {
-      const r = await fetch(`https://www.reddit.com/r/${sub}/hot.json?limit=10`, { headers });
-      const d = await r.json() as { data?: { children?: Array<{ data: unknown }> } };
-      allPosts.push(...(d.data?.children ?? []).map(c => c.data));
-      await new Promise(r2 => setTimeout(r2, 1000));
-    }
-  }
-  return { posts: allPosts.slice(0, 40) };
-}
-
-// ── Product Hunt ──────────────────────────────────────────────────────────────
-async function dataProductHuntLaunches(): Promise<unknown> {
-  const token = process.env['PRODUCTHUNT_API_TOKEN'];
-  if (!token) throw new Error('PRODUCTHUNT_API_TOKEN not configured');
-  const query = `
-    query {
-      posts(order: VOTES, first: 20) {
-        edges {
-          node {
-            id name tagline description votesCount commentsCount
-            createdAt featuredAt url website
-            thumbnail { url }
-            topics { edges { node { name } } }
-            user { name username }
-          }
-        }
-      }
-    }
-  `;
-  const r = await fetch('https://api.producthunt.com/v2/api/graphql', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-  });
-  const d = await r.json() as { data?: { posts?: { edges?: Array<{ node: unknown }> } } };
-  const posts = (d.data?.posts?.edges ?? []).map(e => e.node);
-  return { posts };
 }
 
 // ── Server-side resource pollers ──────────────────────────────────────────────
@@ -3162,271 +606,64 @@ function startPollers(): void {
     refreshRegistry.set(event, () => run() as Promise<void>);
   }
 
-  let pollerCount = 0;
-  const skip = (label: string) => console.log(`  [poll] skipped     ${label} (not configured)`);
-  const group = (label: string) => console.log(`\n  ── ${label}`);
+  // ── Register all providers via ServerContext ──────────────────────────────────
+  const ctx: ServerContext = {
+    json,
+    readBody,
+    route,
+    poll,
+    broadcastSse,
+    broadcastSseEphemeral,
+    resourceCache,
+    refreshRegistry,
+    STRIPE_API_URL: process.env['STRIPE_API_URL'] ?? 'https://api.stripe.com',
+    GITHUB_API_URL: process.env['GITHUB_API_URL'] ?? 'https://api.github.com',
+    CLOUDFLARE_API_URL: process.env['CLOUDFLARE_API_URL'] ?? 'https://api.cloudflare.com/client/v4',
+    PAYPAL_API_URL: process.env['PAYPAL_API_URL'] ?? 'https://api.paypal.com',
+    BACKEND_BASE_URL: process.env['BACKEND_BASE_URL'] ?? '',
+  };
+  providerHandlers.push(
+    registerStripe(ctx),
+    registerGithub(ctx),
+    registerCloudflare(ctx),
+    registerPaypal(ctx),
+    registerVercel(ctx),
+    registerNetlify(ctx),
+    registerCircleci(ctx),
+    registerTravisci(ctx),
+    registerBitrise(ctx),
+    registerSonarqube(ctx),
+    registerAzuredevops(ctx),
+    registerDockerhub(ctx),
+    registerNpm(ctx),
+    registerJsdelivr(ctx),
+    registerWakatime(ctx),
+    registerClockify(ctx),
+    registerLinear(ctx),
+    registerJira(ctx),
+    registerSlack(ctx),
+    registerDiscord(ctx),
+    registerMailchimp(ctx),
+    registerGa4(ctx),
+    registerInstatus(ctx),
+    registerHackernews(ctx),
+    registerRss(ctx),
+    registerAlphavantage(ctx),
+    registerCoingecko(ctx),
+    registerFinnhub(ctx),
+    registerPlaid(ctx),
+    registerHibp(ctx),
+    registerVirustotal(ctx),
+    registerShodan(ctx),
+    registerWoocommerce(ctx),
+    registerShopify(ctx),
+    registerReddit(ctx),
+    registerProducthunt(ctx),
+  );
 
-  group('Payments & Billing');
-  const stripe = getStripe();
-  if (stripe) {
-    const SP = parseInt(process.env['STRIPE_POLL_MS']         ?? '30000',  10);
-    const SL = parseInt(process.env['STRIPE_SLOW_POLL_MS']    ?? '60000',  10);
-    const SR = parseInt(process.env['STRIPE_REVENUE_POLL_MS'] ?? '300000', 10);
-    poll('stripe-payments',      SP, () => dataPayments(stripe));      pollerCount++;
-    poll('stripe-products',      SL, () => dataProducts(stripe));      pollerCount++;
-    poll('stripe-subscriptions', SL, () => dataSubscriptions(stripe)); pollerCount++;
-    poll('stripe-customers',     SL, () => dataCustomerList(stripe));  pollerCount++;
-    poll('stripe-invoices',      SL, () => dataInvoices(stripe));      pollerCount++;
-    poll('stripe-refunds',       SP, () => dataRefunds(stripe));       pollerCount++;
-    poll('stripe-revenue',       SR, () => dataRevenue(stripe));       pollerCount++;
-    poll('stripe-webhooks',      SP, () => dataWebhooks(stripe));      pollerCount++;
-  } else { skip('Stripe'); }
-  if (process.env['PAYPAL_CLIENT_ID'] && process.env['PAYPAL_CLIENT_SECRET']) {
-    poll('paypal-data', parseInt(process.env['PAYPAL_POLL_MS'] ?? '60000', 10), dataPayPal); pollerCount++;
-  } else { skip('PayPal'); }
-
-  group('Deployments');
-  if (process.env['VERCEL_TOKEN']) {
-    poll('vercel-deployments', parseInt(process.env['VERCEL_POLL_MS'] ?? '30000', 10), dataVercelDeployments); pollerCount++;
-  } else { skip('Vercel'); }
-  if (process.env['NETLIFY_TOKEN']) {
-    poll('netlify-deployments', parseInt(process.env['NETLIFY_POLL_MS'] ?? '30000', 10), dataNetlifyDeployments); pollerCount++;
-  } else { skip('Netlify'); }
-
-  group('CI / Build');
-  if (process.env['GITHUB_TOKEN'] && (process.env['GITHUB_ORG'] || process.env['GITHUB_USER'])) {
-    poll('github-runs', parseInt(process.env['GITHUB_POLL_MS'] ?? '30000', 10), dataGithubRuns); pollerCount++;
-  } else { skip('GitHub'); }
-  if (process.env['CIRCLECI_TOKEN'] && process.env['CIRCLECI_ORG_SLUG']) {
-    poll('circleci-pipelines', parseInt(process.env['CIRCLECI_POLL_MS'] ?? '60000', 10), dataCircleCIPipelines); pollerCount++;
-    poll('circleci-insights',  parseInt(process.env['CIRCLECI_POLL_MS'] ?? '60000', 10), dataCircleCIInsights);  pollerCount++;
-  } else { skip('CircleCI'); }
-  if (process.env['TRAVIS_TOKEN'] && process.env['TRAVIS_ORG']) {
-    poll('travis-builds', parseInt(process.env['TRAVIS_POLL_MS'] ?? '60000', 10), dataTravisBuilds); pollerCount++;
-  } else { skip('Travis CI'); }
-  if (process.env['BITRISE_TOKEN']) {
-    poll('bitrise-builds', parseInt(process.env['BITRISE_POLL_MS'] ?? '60000', 10), dataBitriseBuilds); pollerCount++;
-  } else { skip('Bitrise'); }
-  if (process.env['DOCKERHUB_USERNAME']) {
-    poll('dockerhub-repositories', parseInt(process.env['DOCKERHUB_POLL_MS'] ?? '300000', 10), dataDockerHubRepos); pollerCount++;
-  } else { skip('Docker Hub'); }
-  if (process.env['SONARQUBE_URL'] && process.env['SONARQUBE_TOKEN']) {
-    poll('sonarqube-quality',  parseInt(process.env['SONARQUBE_POLL_MS'] ?? '120000', 10), dataSonarQubeQuality);  pollerCount++;
-    poll('sonarqube-measures', parseInt(process.env['SONARQUBE_POLL_MS'] ?? '120000', 10), dataSonarQubeMeasures); pollerCount++;
-    poll('sonarqube-issues',   parseInt(process.env['SONARQUBE_POLL_MS'] ?? '120000', 10), dataSonarQubeIssues);   pollerCount++;
-  } else { skip('SonarQube'); }
-  if (process.env['AZURE_DEVOPS_ORG'] && process.env['AZURE_DEVOPS_TOKEN']) {
-    poll('azuredevops-pipelines', parseInt(process.env['AZURE_POLL_MS'] ?? '60000', 10), dataAzurePipelines); pollerCount++;
-    if (process.env['AZURE_DEVOPS_PROJECT']) {
-      poll('azuredevops-releases',  parseInt(process.env['AZURE_POLL_MS'] ?? '60000', 10),  dataAzureReleases);  pollerCount++;
-      poll('azuredevops-workitems', parseInt(process.env['AZURE_POLL_MS'] ?? '120000', 10), dataAzureWorkItems); pollerCount++;
-    }
-  } else { skip('Azure DevOps'); }
-  if (process.env['CF_API_TOKEN'] && process.env['CF_ACCOUNT_ID']) {
-    poll('cf-pages',   parseInt(process.env['CF_PAGES_POLL_MS']   ?? '60000',  10), dataCFPages);   pollerCount++;
-    poll('cf-workers', parseInt(process.env['CF_WORKERS_POLL_MS'] ?? '120000', 10), dataCFWorkers); pollerCount++;
-  } else { skip('Cloudflare'); }
-
-  group('Package / CDN');
-  if (process.env['NPM_PACKAGES']) {
-    poll('npm-downloads', parseInt(process.env['NPM_POLL_MS'] ?? '3600000', 10), dataNpmDownloads); pollerCount++;
-  } else { skip('npm Registry'); }
-  if (process.env['JSDELIVR_PACKAGES']) {
-    poll('jsdelivr-hits', parseInt(process.env['JSDELIVR_POLL_MS'] ?? '3600000', 10), dataJsDelivrStats); pollerCount++;
-  } else { skip('jsDelivr'); }
-
-  group('Productivity');
-  if (process.env['WAKATIME_API_KEY']) {
-    poll('wakatime-summary', parseInt(process.env['WAKATIME_POLL_MS'] ?? '300000', 10), dataWakaTimeSummary); pollerCount++;
-  } else { skip('WakaTime'); }
-  if (process.env['CLOCKIFY_API_KEY'] && process.env['CLOCKIFY_WORKSPACE_ID']) {
-    poll('clockify-time-entries', parseInt(process.env['CLOCKIFY_POLL_MS'] ?? '300000', 10), dataClockifyTimeEntries); pollerCount++;
-  } else { skip('Clockify'); }
-  if (process.env['LINEAR_API_KEY']) {
-    poll('linear-issues', parseInt(process.env['LINEAR_POLL_MS'] ?? '120000', 10), dataLinearIssues); pollerCount++;
-  } else { skip('Linear'); }
-  if (process.env['JIRA_HOST'] && process.env['JIRA_EMAIL'] && process.env['JIRA_API_TOKEN']) {
-    poll('jira-issues', parseInt(process.env['JIRA_POLL_MS'] ?? '120000', 10), dataJiraIssues); pollerCount++;
-  } else { skip('Jira'); }
-
-  group('Comms');
-  if (process.env['SLACK_BOT_TOKEN']) {
-    poll('slack-messages', parseInt(process.env['SLACK_POLL_MS'] ?? '30000', 10), dataSlackMessages); pollerCount++;
-  } else { skip('Slack'); }
-  if (process.env['DISCORD_BOT_TOKEN']) {
-    poll('discord-server-stats', parseInt(process.env['DISCORD_POLL_MS'] ?? '300000', 10), dataDiscordServerStats); pollerCount++;
-  } else { skip('Discord'); }
-  if (process.env['MAILCHIMP_API_KEY']) {
-    poll('mailchimp-campaigns', parseInt(process.env['MAILCHIMP_POLL_MS'] ?? '300000', 10), dataMailchimpCampaigns); pollerCount++;
-  } else { skip('Mailchimp'); }
-
-  group('Analytics');
-  if (process.env['GA4_SERVICE_ACCOUNT_JSON'] && process.env['GA4_PROPERTY_ID']) {
-    poll('ga4-sessions-trend', parseInt(process.env['GA4_POLL_MS'] ?? '3600000', 10), dataGA4Sessions); pollerCount++;
-  } else { skip('GA4'); }
-  if (process.env['INSTATUS_PAGE_ID']) {
-    poll('instatus-overview', parseInt(process.env['INSTATUS_POLL_MS'] ?? '60000', 10), dataInstatusOverview); pollerCount++;
-  } else { skip('Instatus'); }
-  poll('hn-top-stories', parseInt(process.env['HN_POLL_MS'] ?? '300000', 10), dataHNTopStories); pollerCount++; // always on
-
-  group('Finance');
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_SYMBOLS']) {
-    poll('alphavantage-quotes', parseInt(process.env['AV_POLL_MS'] ?? '3600000', 10), dataAlphaVantageQuotes); pollerCount++;
-  } else { skip('Alpha Vantage'); }
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_SYMBOLS']) {
-    poll('alphavantage-sparklines', parseInt(process.env['AV_SPARK_POLL_MS'] ?? '3600000', 10), dataAvSparklines); pollerCount++;
-  } else { skip('Alpha Vantage Sparklines'); }
-  if (process.env['COINGECKO_COINS']) {
-    poll('coingecko-markets', parseInt(process.env['CG_POLL_MS'] ?? '300000', 10), dataCoinGeckoMarkets); pollerCount++;
-  } else { skip('CoinGecko'); }
-  if (process.env['COINGECKO_COINS']) {
-    poll('coingecko-global', parseInt(process.env['CG_POLL_MS'] ?? '600000', 10), dataCoinGeckoGlobal); pollerCount++;
-  } else { skip('CoinGecko Global'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-quotes', parseInt(process.env['FINNHUB_POLL_MS'] ?? '60000', 10), dataFinnhubQuotes); pollerCount++;
-  } else { skip('Finnhub'); }
-  if (process.env['FINNHUB_TOKEN']) {
-    poll('finnhub-news', parseInt(process.env['FH_NEWS_POLL_MS'] ?? '300000', 10), dataFinnhubNews); pollerCount++;
-  } else { skip('Finnhub News'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-accounts', parseInt(process.env['PLAID_POLL_MS'] ?? '300000', 10), dataPlaidAccounts); pollerCount++;
-  } else { skip('Plaid'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-transactions', parseInt(process.env['PLAID_POLL_MS'] ?? '300000', 10), dataPlaidTransactions); pollerCount++;
-  } else { skip('Plaid Transactions'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-investment-portfolio', parseInt(process.env['PLAID_INV_POLL_MS'] ?? '600000', 10), dataPlaidInvestmentPortfolio); pollerCount++;
-  } else { skip('Plaid Investment Portfolio'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-investment-transactions', parseInt(process.env['PLAID_INVTX_POLL_MS'] ?? '600000', 10), dataPlaidInvestmentTransactions); pollerCount++;
-  } else { skip('Plaid Investment Transactions'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-liabilities-overview', parseInt(process.env['PLAID_LIAB_POLL_MS'] ?? '1800000', 10), dataPlaidLiabilities); pollerCount++;
-  } else { skip('Plaid Liabilities'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-credit-card-details', parseInt(process.env['PLAID_CC_POLL_MS'] ?? '1800000', 10), dataPlaidCreditCards); pollerCount++;
-  } else { skip('Plaid Credit Cards'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-mortgage-tracker', parseInt(process.env['PLAID_MORT_POLL_MS'] ?? '3600000', 10), dataPlaidMortgage); pollerCount++;
-  } else { skip('Plaid Mortgage'); }
-  if (process.env['PLAID_ACCESS_TOKEN'] && process.env['PLAID_CLIENT_ID'] && process.env['PLAID_SECRET']) {
-    poll('plaid-statements', parseInt(process.env['PLAID_STMT_POLL_MS'] ?? '3600000', 10), dataPlaidStatements); pollerCount++;
-  } else { skip('Plaid Statements'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-market-status', parseInt(process.env['AV_MKTSTATUS_POLL_MS'] ?? '900000', 10), dataAvMarketStatus); pollerCount++;
-  } else { skip('Alpha Vantage Market Status'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-market-movers', parseInt(process.env['AV_MOVERS_POLL_MS'] ?? '900000', 10), dataAvMarketMovers); pollerCount++;
-  } else { skip('Alpha Vantage Market Movers'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-news-sentiment', parseInt(process.env['AV_NEWS_POLL_MS'] ?? '3600000', 10), dataAvNewsSentiment); pollerCount++;
-  } else { skip('Alpha Vantage News Sentiment'); }
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_SYMBOLS']) {
-    poll('alphavantage-earnings', parseInt(process.env['AV_EARNINGS_POLL_MS'] ?? '21600000', 10), dataAvEarnings); pollerCount++;
-  } else { skip('Alpha Vantage Earnings'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-earnings-calendar', parseInt(process.env['AV_CALENDAR_POLL_MS'] ?? '86400000', 10), dataAvEarningsCalendar); pollerCount++;
-  } else { skip('Alpha Vantage Earnings Calendar'); }
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_SYMBOLS']) {
-    poll('alphavantage-fundamentals', parseInt(process.env['AV_FUNDA_POLL_MS'] ?? '21600000', 10), dataAvFundamentals); pollerCount++;
-  } else { skip('Alpha Vantage Fundamentals'); }
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_FOREX_PAIRS']) {
-    poll('alphavantage-forex-rates', parseInt(process.env['AV_FOREX_POLL_MS'] ?? '3600000', 10), dataAvForexRates); pollerCount++;
-  } else { skip('Alpha Vantage Forex Rates'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-commodities', parseInt(process.env['AV_COMMOD_POLL_MS'] ?? '21600000', 10), dataAvCommodities); pollerCount++;
-  } else { skip('Alpha Vantage Commodities'); }
-  if (process.env['ALPHA_VANTAGE_KEY']) {
-    poll('alphavantage-economic-indicators', parseInt(process.env['AV_ECON_POLL_MS'] ?? '86400000', 10), dataAvEconomicIndicators); pollerCount++;
-  } else { skip('Alpha Vantage Economic Indicators'); }
-  if (process.env['ALPHA_VANTAGE_KEY'] && process.env['AV_SYMBOLS']) {
-    poll('alphavantage-insider-transactions', parseInt(process.env['AV_INSIDER_POLL_MS'] ?? '86400000', 10), dataAvInsiderTransactions); pollerCount++;
-  } else { skip('Alpha Vantage Insider Transactions'); }
-
-  poll('coingecko-trending', parseInt(process.env['CG_TRENDING_POLL_MS'] ?? '900000', 10), dataCoinGeckoTrending); pollerCount++;
-  if (process.env['COINGECKO_COINS']) {
-    poll('coingecko-price-chart', parseInt(process.env['CG_CHART_POLL_MS'] ?? '600000', 10), dataCoinGeckoPriceChart); pollerCount++;
-  } else { skip('CoinGecko Price Chart'); }
-  poll('coingecko-defi-overview', parseInt(process.env['CG_DEFI_POLL_MS'] ?? '600000', 10), dataCoinGeckoDefi); pollerCount++;
-  poll('coingecko-categories', parseInt(process.env['CG_CAT_POLL_MS'] ?? '1800000', 10), dataCoinGeckoCategories); pollerCount++;
-  poll('coingecko-exchanges', parseInt(process.env['CG_EXCH_POLL_MS'] ?? '1800000', 10), dataCoinGeckoExchanges); pollerCount++;
-  if (process.env['COINGECKO_COINS']) {
-    poll('coingecko-coin-detail', parseInt(process.env['CG_DETAIL_POLL_MS'] ?? '300000', 10), dataCoinGeckoCoinDetail); pollerCount++;
-  } else { skip('CoinGecko Coin Detail'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-company-news', parseInt(process.env['FH_CNEWS_POLL_MS'] ?? '300000', 10), dataFinnhubCompanyNews); pollerCount++;
-  } else { skip('Finnhub Company News'); }
-  if (process.env['FINNHUB_TOKEN']) {
-    poll('finnhub-market-news', parseInt(process.env['FH_MKTNS_POLL_MS'] ?? '300000', 10), dataFinnhubMarketNews); pollerCount++;
-  } else { skip('Finnhub Market News'); }
-  if (process.env['FINNHUB_TOKEN']) {
-    poll('finnhub-earnings-calendar', parseInt(process.env['FH_EARNCAL_POLL_MS'] ?? '3600000', 10), dataFinnhubEarningsCalendar); pollerCount++;
-  } else { skip('Finnhub Earnings Calendar'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-earnings-surprises', parseInt(process.env['FH_EARNSU_POLL_MS'] ?? '3600000', 10), dataFinnhubEarningsSurprises); pollerCount++;
-  } else { skip('Finnhub Earnings Surprises'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-analyst-consensus', parseInt(process.env['FH_ANALYST_POLL_MS'] ?? '3600000', 10), dataFinnhubAnalystConsensus); pollerCount++;
-  } else { skip('Finnhub Analyst Consensus'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-fundamentals', parseInt(process.env['FH_FUNDA_POLL_MS'] ?? '3600000', 10), dataFinnhubFundamentals); pollerCount++;
-  } else { skip('Finnhub Fundamentals'); }
-  if (process.env['FINNHUB_TOKEN']) {
-    poll('finnhub-market-status', parseInt(process.env['FH_MKTSTATUS_POLL_MS'] ?? '300000', 10), dataFinnhubMarketStatus); pollerCount++;
-  } else { skip('Finnhub Market Status'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-insider-transactions', parseInt(process.env['FH_INSIDERTX_POLL_MS'] ?? '3600000', 10), dataFinnhubInsiderTransactions); pollerCount++;
-  } else { skip('Finnhub Insider Transactions'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-insider-sentiment', parseInt(process.env['FH_INSIDERST_POLL_MS'] ?? '3600000', 10), dataFinnhubInsiderSentiment); pollerCount++;
-  } else { skip('Finnhub Insider Sentiment'); }
-  if (process.env['FINNHUB_TOKEN']) {
-    poll('finnhub-ipo-calendar', parseInt(process.env['FH_IPO_POLL_MS'] ?? '3600000', 10), dataFinnhubIpoCalendar); pollerCount++;
-  } else { skip('Finnhub IPO Calendar'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-sec-filings', parseInt(process.env['FH_FILINGS_POLL_MS'] ?? '3600000', 10), dataFinnhubSecFilings); pollerCount++;
-  } else { skip('Finnhub SEC Filings'); }
-  if (process.env['FINNHUB_TOKEN'] && process.env['FH_SYMBOLS']) {
-    poll('finnhub-company-profile', parseInt(process.env['FH_PROFILE_POLL_MS'] ?? '21600000', 10), dataFinnhubCompanyProfile); pollerCount++;
-  } else { skip('Finnhub Company Profile'); }
-
-  group('Security');
-  if (process.env['HIBP_API_KEY'] && process.env['HIBP_EMAILS']) {
-    poll('hibp-breaches', parseInt(process.env['HIBP_POLL_MS'] ?? '21600000', 10), dataHibpBreaches); pollerCount++;
-  } else { skip('HIBP'); }
-  if (process.env['VIRUSTOTAL_API_KEY'] && process.env['VT_DOMAINS']) {
-    poll('virustotal-analyses', parseInt(process.env['VT_POLL_MS'] ?? '86400000', 10), dataVirusTotalAnalyses); pollerCount++;
-  } else { skip('VirusTotal'); }
-  if (process.env['SHODAN_API_KEY']) {
-    poll('shodan-search', parseInt(process.env['SHODAN_POLL_MS'] ?? '3600000', 10), dataShodanSearch); pollerCount++;
-  } else { skip('Shodan'); }
-
-  group('E-commerce');
-  if (process.env['WC_BASE_URL'] && process.env['WC_CONSUMER_KEY'] && process.env['WC_CONSUMER_SECRET']) {
-    poll('woocommerce-orders', parseInt(process.env['WC_POLL_MS'] ?? '120000', 10), dataWooCommerceOrders); pollerCount++;
-  } else { skip('WooCommerce'); }
-  if (process.env['WC_BASE_URL'] && process.env['WC_CONSUMER_KEY'] && process.env['WC_CONSUMER_SECRET']) {
-    poll('woocommerce-sales-summary', parseInt(process.env['WC_POLL_MS'] ?? '600000', 10), dataWooSalesSummary); pollerCount++;
-  } else { skip('WooCommerce Sales Summary'); }
-  if (process.env['WC_BASE_URL'] && process.env['WC_CONSUMER_KEY'] && process.env['WC_CONSUMER_SECRET']) {
-    poll('woocommerce-top-sellers', parseInt(process.env['WC_POLL_MS'] ?? '1800000', 10), dataWooTopSellers); pollerCount++;
-  } else { skip('WooCommerce Top Sellers'); }
-  if (process.env['SHOPIFY_SHOP'] && process.env['SHOPIFY_ACCESS_TOKEN']) {
-    poll('shopify-orders', parseInt(process.env['SHOPIFY_POLL_MS'] ?? '120000', 10), dataShopifyOrders); pollerCount++;
-  } else { skip('Shopify'); }
-  if (process.env['SHOPIFY_SHOP'] && process.env['SHOPIFY_ACCESS_TOKEN']) {
-    poll('shopify-products', parseInt(process.env['SHOPIFY_POLL_MS'] ?? '600000', 10), dataShopifyProducts); pollerCount++;
-  } else { skip('Shopify Products'); }
-
-  group('Social');
-  if (process.env['REDDIT_SUBREDDITS'] || process.env['REDDIT_KEYWORDS']) {
-    poll('reddit-posts', parseInt(process.env['REDDIT_POLL_MS'] ?? '300000', 10), dataRedditPosts); pollerCount++;
-  } else { skip('Reddit'); }
-  if (process.env['PRODUCTHUNT_API_TOKEN']) {
-    poll('producthunt-top-launches', parseInt(process.env['PH_POLL_MS'] ?? '3600000', 10), dataProductHuntLaunches); pollerCount++;
-  } else { skip('Product Hunt'); }
-
-  console.log(`\n  ${pollerCount} pollers started — initial fetches running in background...\n`);
+  console.log(`
+  ${providerHandlers.length} providers registered — initial fetches running in background...
+`);
 
   // Broadcast which channels are unconfigured so tiles can render a helpful
   // "missing env vars" banner instead of showing a perpetual loading spinner.
@@ -3579,6 +816,396 @@ async function route<T>(res: ServerResponse, fn: () => Promise<T>): Promise<void
   }
 }
 
+// ── MCP (Model Context Protocol) server ──────────────────────────────────────
+
+let TWM_VERSION = '0.0.0';
+try {
+  const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version?: string };
+  TWM_VERSION = pkg.version ?? '0.0.0';
+} catch { /* ignore */ }
+
+/** Connected MCP SSE clients (GET /api/mcp transport). */
+const mcpSseClients = new Set<ServerResponse>();
+
+/** Push a JSON-RPC 2.0 notification to all connected MCP SSE clients. */
+function broadcastMcpNotification(method: string, params: unknown): void {
+  const msg = JSON.stringify({ jsonrpc: '2.0', method, params });
+  const chunk = `data: ${msg}\n\n`;
+  for (const client of [...mcpSseClients]) {
+    try { client.write(chunk); } catch { mcpSseClients.delete(client); }
+  }
+}
+
+interface McpRequest {
+  jsonrpc: '2.0';
+  id: number | string | null;
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+type McpResponse =
+  | { jsonrpc: '2.0'; id: number | string | null; result: unknown }
+  | { jsonrpc: '2.0'; id: number | string | null; error: { code: number; message: string } };
+
+function mcpResult(id: number | string | null, result: unknown): McpResponse {
+  return { jsonrpc: '2.0', id, result };
+}
+function mcpError(id: number | string | null, code: number, message: string): McpResponse {
+  return { jsonrpc: '2.0', id, error: { code, message } };
+}
+
+/** Dispatch a single JSON-RPC 2.0 MCP request and return the response. */
+async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise<McpResponse> {
+  const { id, method, params } = rpc;
+
+  if (method === 'initialize') {
+    return mcpResult(id, {
+      protocolVersion: '2024-11-05',
+      serverInfo: { name: 'twm', version: TWM_VERSION },
+      capabilities: { tools: {}, resources: {}, prompts: {} },
+    });
+  }
+
+  if (method === 'tools/list') {
+    return mcpResult(id, {
+      tools: [
+        {
+          name: 'add_tile',
+          description: 'Append a new tile to the current dashboard layout.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              type:      { type: 'string',  description: 'Tile type (e.g. "ws", "stripe-payments")' },
+              config:    { type: 'object',  description: 'Provider-specific config' },
+              x:         { type: 'number',  description: 'Grid column' },
+              y:         { type: 'number',  description: 'Grid row' },
+              w:         { type: 'number',  description: 'Width in grid columns' },
+              h:         { type: 'number',  description: 'Height in grid rows' },
+              workspace: { type: 'string',  description: 'Workspace name (default: dashboard-1)' },
+            },
+            required: ['type'],
+          },
+        },
+        {
+          name: 'remove_tile',
+          description: 'Remove a tile from the dashboard by its id.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id:        { type: 'string', description: 'Tile id to remove' },
+              workspace: { type: 'string', description: 'Workspace name (default: dashboard-1)' },
+            },
+            required: ['id'],
+          },
+        },
+        {
+          name: 'update_tile',
+          description: 'Merge a patch object into an existing tile.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id:        { type: 'string', description: 'Tile id to update' },
+              patch:     { type: 'object', description: 'Key/value pairs to merge into the tile' },
+              workspace: { type: 'string', description: 'Workspace name (default: dashboard-1)' },
+            },
+            required: ['id', 'patch'],
+          },
+        },
+        {
+          name: 'reload_env',
+          description: 'Reload the server .env file and apply updated environment variables.',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'get_tile_data',
+          description: 'Return the latest cached data for a given SSE channel or tile ID. SSE-based tiles (e.g. stripe-payments) use their channel name. Client-side tiles (rest, custom-api, websocket, graphql) report their data by tile ID — pass the tile\'s UUID as the channel value.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              channel:   { type: 'string', description: 'SSE event/channel name or tile UUID' },
+              workspace: { type: 'string', description: 'Workspace name (default: dashboard-1)' },
+            },
+            required: ['channel'],
+          },
+        },
+        {
+          name: 'list_tiles',
+          description: 'Return the full list of tiles currently on the dashboard, including their IDs, types, positions, and config.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              workspace: { type: 'string', description: 'Workspace name (default: dashboard-1)' },
+            },
+          },
+        },
+      ],
+    });
+  }
+
+  if (method === 'tools/call') {
+    const toolName = params?.['name'] as string | undefined;
+    const args = (params?.['arguments'] ?? {}) as Record<string, unknown>;
+
+    // Read-only tools are always permitted; write tools require auth when MCP_AUTH_REQUIRED.
+    const isWriteTool = toolName === 'add_tile' || toolName === 'remove_tile' || toolName === 'update_tile' || toolName === 'reload_env';
+    if (isWriteTool && MCP_AUTH_REQUIRED && !jwtUser) {
+      return mcpError(id, -32001, 'Unauthorized — provide a JWT via Authorization: Bearer <token>');
+    }
+
+    // Snap a number to the 16px grid
+    const snap16 = (n: number) => Math.round(n / 16) * 16;
+    // Workspace — falls back to 'dashboard-1' which is the default workspace name.
+    const ws = (args['workspace'] as string | undefined) ?? 'dashboard-1';
+
+    if (toolName === 'add_tile') {
+      const tileType = args['type'] as string | undefined;
+      if (!tileType) return mcpError(id, -32602, 'add_tile requires "type"');
+      const configFields = (args['config'] && typeof args['config'] === 'object' && !Array.isArray(args['config']))
+        ? args['config'] as Record<string, unknown>
+        : {};
+      // Nest config under the correct sub-key so renderTile can find it.
+      // Provider tiles (e.g. stripe-payments) don't use sub-keys — spread flat.
+      const configSubKey: Record<string, string> = {
+        'rest': 'rest', 'websocket': 'ws', 'custom-api': 'customApi',
+        'graphql': 'graphql', 'rss-feed': 'rss',
+      };
+      const subKey = configSubKey[tileType];
+      const nestedConfig = subKey ? { [subKey]: configFields } : configFields;
+      const newTile: Record<string, unknown> = {
+        id: crypto.randomUUID(),
+        type: tileType,
+        x: snap16(Number(args['x'] ?? 8)),
+        y: snap16(Number(args['y'] ?? 8)),
+        w: snap16(Number(args['w'] ?? 400)),
+        h: snap16(Number(args['h'] ?? 300)),
+        ...nestedConfig,
+      };
+
+      // Use broadcastSseEphemeral so tile-op is NOT stored in resourceCache.
+      // Caching tile-op would cause it to replay on new SSE connections, adding the same tile twice.
+      broadcastSseEphemeral('tile-op', { op: 'add', tile: newTile });
+      if (jwtUser) {
+        const layout = readLayout(jwtUser.sub, ws);
+        // Seed mcpLayout from DB on first authenticated call so it reflects pre-existing tiles.
+        if (mcpLayout.length === 0) mcpLayout.push(...layout);
+        layout.push(newTile);
+        writeLayout(jwtUser.sub, ws, layout);
+      }
+      mcpLayout.push(newTile);
+      broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, tile: newTile }, null, 2) }] });
+    }
+
+    if (toolName === 'remove_tile') {
+      const tileId = args['id'] as string | undefined;
+      if (!tileId) return mcpError(id, -32602, 'remove_tile requires "id"');
+      broadcastSseEphemeral('tile-op', { op: 'remove', id: tileId });
+      mcpLayout = mcpLayout.filter((t) => t['id'] !== tileId);
+      if (jwtUser) {
+        const layout = readLayout(jwtUser.sub, ws);
+        const updated = layout.filter((t) => (t as Record<string, unknown>)['id'] !== tileId);
+        writeLayout(jwtUser.sub, ws, updated);
+      }
+      broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
+    }
+
+    if (toolName === 'update_tile') {
+      const tileId = args['id'] as string | undefined;
+      const patch  = args['patch'] as Record<string, unknown> | undefined;
+      if (!tileId || !patch) return mcpError(id, -32602, 'update_tile requires "id" and "patch"');
+      broadcastSseEphemeral('tile-op', { op: 'update', id: tileId, patch });
+      mcpLayout = mcpLayout.map((t) => t['id'] === tileId ? { ...t, ...patch, id: t['id'] } : t);
+      if (jwtUser) {
+        const layout = readLayout(jwtUser.sub, ws);
+        const updated = layout.map((t) => {
+          const tile = t as Record<string, unknown>;
+          return tile['id'] === tileId ? { ...tile, ...patch, id: tile['id'] } : tile;
+        });
+        writeLayout(jwtUser.sub, ws, updated);
+      }
+      broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
+    }
+
+    if (toolName === 'reload_env') {
+      try {
+        const content = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : '';
+        const vars = parseEnvFile(content);
+        const reloaded: string[] = [];
+        for (const [k, v] of Object.entries(vars)) {
+          if (process.env[k] !== v) { process.env[k] = v; reloaded.push(k); }
+        }
+        console.log(`  [mcp]  reload-env  ${reloaded.length} keys: ${reloaded.join(', ') || '(none)'}`);
+        return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, reloaded }) }] });
+      } catch (e) {
+        return mcpError(id, -32603, e instanceof Error ? e.message : 'reload_env failed');
+      }
+    }
+
+    if (toolName === 'get_tile_data') {
+      const channel = args['channel'] as string | undefined;
+      if (!channel) return mcpError(id, -32602, 'get_tile_data requires "channel"');
+
+      // 1. Check the SSE resource cache (populated by server-side pollers for
+      //    provider tiles like stripe-revenue, github-actions, etc.).
+      const cached = resourceCache.get(channel);
+      if (cached !== undefined) {
+        return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ channel, data: cached }, null, 2) }] });
+      }
+
+      // 2. Channel looks like a UUID — treat it as a tile ID and fetch its data
+      //    server-side from the DB-backed tile config. This works even when the
+      //    browser is closed. Currently supports REST tiles (type='rest').
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (UUID_RE.test(channel) && jwtUser) {
+        const layout = readLayout(jwtUser.sub, ws);
+        const tile = layout.find((t) => (t as Record<string, unknown>)['id'] === channel) as Record<string, unknown> | undefined;
+        if (tile) {
+          const restCfg = tile['rest'] as { url?: string; headers?: Record<string, string> } | undefined;
+          if (restCfg?.url) {
+            try {
+              const fetchRes = await fetch(restCfg.url, { headers: restCfg.headers ?? {} });
+              const ct = fetchRes.headers.get('content-type') ?? '';
+              const data = ct.includes('json') ? await fetchRes.json() : await fetchRes.text();
+              resourceCache.set(channel, data);
+              return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ channel, data }, null, 2) }] });
+            } catch (e) {
+              return mcpError(id, -32603, `Failed to fetch tile data: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+          // Tile exists but isn't a fetchable type — return tile type info
+          return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ channel, data: null, note: `Tile type '${tile['type']}' requires browser to report data` }, null, 2) }] });
+        }
+      }
+
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ channel, data: null }, null, 2) }] });
+    }
+
+    if (toolName === 'list_tiles') {
+      const tiles = jwtUser ? readLayout(jwtUser.sub, ws) : [];
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify(tiles, null, 2) }] });
+    }
+
+    return mcpError(id, -32601, `Unknown tool: ${toolName}`);
+  }
+
+  if (method === 'resources/list') {
+    return mcpResult(id, {
+      resources: [
+        {
+          uri:         'dashboard://tiles',
+          name:        'Dashboard tiles',
+          description: 'Full tile layout array for the current user.',
+          mimeType:    'application/json',
+        },
+        {
+          uri:         'dashboard://layout',
+          name:        'Dashboard layout metadata',
+          description: 'Active SSE channels and connection statistics.',
+          mimeType:    'application/json',
+        },
+      ],
+    });
+  }
+
+  if (method === 'resources/read') {
+    const uri = params?.['uri'] as string | undefined;
+    if (uri === 'dashboard://tiles') {
+      const tiles = jwtUser ? readLayout(jwtUser.sub, 'dashboard-1') : [];
+      return mcpResult(id, {
+        contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(tiles, null, 2) }],
+      });
+    }
+    if (uri === 'dashboard://layout') {
+      const meta = {
+        channels:          [...resourceCache.keys()],
+        activeConnections: sseClients.size,
+        mcpConnections:    mcpSseClients.size,
+      };
+      return mcpResult(id, {
+        contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(meta, null, 2) }],
+      });
+    }
+    return mcpError(id, -32602, `Unknown resource URI: ${uri}`);
+  }
+
+  if (method === 'prompts/list') {
+    return mcpResult(id, {
+      prompts: [
+        {
+          name:        'dashboard_summary',
+          description: 'Markdown summary of all tiles in the current dashboard.',
+        },
+      ],
+    });
+  }
+
+  if (method === 'prompts/get') {
+    const promptName = params?.['name'] as string | undefined;
+    if (promptName === 'dashboard_summary') {
+      const tiles = jwtUser ? readLayout(jwtUser.sub, 'dashboard-1') : [];
+      const rows = tiles.map((t) => {
+        const tile = t as Record<string, unknown>;
+        const cfg  = (tile['config'] ?? {}) as Record<string, unknown>;
+        const type  = String(tile['type']  ?? '');
+        const title = String(cfg['title']  ?? cfg['label'] ?? '');
+        const ep    = String(cfg['url']    ?? cfg['endpoint'] ?? cfg['channel'] ?? '');
+        return `| ${type} | ${title} | ${ep} |`;
+      });
+      const header = '| type | title | endpoint |\n|------|-------|----------|';
+      const text   = `# Dashboard Summary\n\n${header}\n${rows.join('\n') || '| — | no tiles | — |'}`;
+      return mcpResult(id, {
+        messages: [
+          { role: 'user', content: { type: 'text', text } },
+        ],
+      });
+    }
+    return mcpError(id, -32602, `Unknown prompt: ${promptName}`);
+  }
+
+  return mcpError(id, -32601, `Method not found: ${method}`);
+}
+
+/** Handle POST /api/mcp — stateless HTTP JSON-RPC 2.0 transport. */
+async function handleMcpPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const jwtUser = extractToken(req);
+  let rpc: McpRequest;
+  try {
+    const body = await readBody(req);
+    rpc = JSON.parse(body) as McpRequest;
+  } catch {
+    json(res, 400, mcpError(null, -32700, 'Parse error'));
+    return;
+  }
+  if (rpc.jsonrpc !== '2.0' || !rpc.method) {
+    json(res, 400, mcpError(rpc.id ?? null, -32600, 'Invalid Request'));
+    return;
+  }
+  const response = await dispatchMcp(rpc, jwtUser);
+  json(res, 200, response);
+}
+
+/** Handle GET /api/mcp — SSE transport; pushes JSON-RPC 2.0 notifications. */
+function handleMcpSse(req: IncomingMessage, res: ServerResponse): void {
+  const clientIp = req.socket.remoteAddress ?? 'unknown';
+  console.log(`  [mcp]  SSE connected  ip=${clientIp}  total=${mcpSseClients.size + 1}`);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    ...CORS,
+  });
+  // Send endpoint event so MCP clients know where to POST requests.
+  res.write(`event: endpoint\ndata: /api/mcp\n\n`);
+  res.write(': connected\n\n');
+  mcpSseClients.add(res);
+  req.on('close', () => {
+    mcpSseClients.delete(res);
+    console.log(`  [mcp]  SSE disconnected ip=${clientIp}  total=${mcpSseClients.size}`);
+  });
+}
+
 // ── Main request router ───────────────────────────────────────────────────────
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
@@ -3586,7 +1213,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   const method = req.method ?? 'GET';
 
   if (method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return; }
-  if (pathname === '/health') { json(res, 200, { ok: true, stripe: getStripe() !== null }); return; }
+  if (pathname === '/health') { json(res, 200, { ok: true }); return; }
 
   if (!pathname.startsWith('/api/')) { json(res, 404, { error: 'Not found' }); return; }
 
@@ -3594,6 +1221,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (pathname === '/api/sse' && method === 'GET') {
     if (AUTH_ENABLED && !extractToken(req)) { json(res, 401, { error: 'Unauthorized' }); return; }
     handleSseStream(req, res); return;
+  }
+
+  // ── MCP endpoint ───────────────────────────────────────────────────────────
+  if (pathname === '/api/mcp') {
+    if (!MCP_ENABLED) { json(res, 503, { error: 'MCP is not enabled. Set MCP_ENABLED=true in .env.' }); return; }
+    if (method === 'GET') {
+      handleMcpSse(req, res); return;
+    }
+    if (method === 'POST') {
+      await handleMcpPost(req, res); return;
+    }
+    json(res, 405, { error: 'Method Not Allowed' }); return;
   }
 
   // ── Auth routes (always public) ────────────────────────────────────────────
@@ -3704,8 +1343,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // ── Auth middleware — guards all routes below when AUTH_ENABLED ────────────
   // Webhook receive routes are intentionally public — providers cannot supply
   // a user JWT, so signature verification is the sole authentication mechanism.
+  // Tile data report route is also public — the tile UUID is the credential and
+  // the endpoint is rate-limited; no sensitive data is exposed.
   const isWebhookRoute = pathname.startsWith('/api/webhooks/') && method === 'POST';
-  if (AUTH_ENABLED && !isWebhookRoute && !extractToken(req)) {
+  const isTileDataReport = pathname.startsWith('/api/tiles/') && pathname.endsWith('/data') && method === 'POST';
+  if (AUTH_ENABLED && !isWebhookRoute && !isTileDataReport && !extractToken(req)) {
     json(res, 401, { error: 'Unauthorized' });
     return;
   }
@@ -3947,46 +1589,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
-  // ── GitHub Actions ─────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/github/')) {
-    if (pathname === '/api/github/runs' && method === 'GET') { await getGitHubRuns(res); return; }
-    json(res, 404, { error: `Unknown GitHub route: ${pathname}` }); return;
-  }
-
-  // ── Cloudflare ─────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/cloudflare/')) {
-    if (pathname === '/api/cloudflare/pages' && method === 'GET') { await getCFPages(res); return; }
-    if (pathname === '/api/cloudflare/workers' && method === 'GET') { await getCFWorkers(res); return; }
-    // /api/cloudflare/pages/{projectName}/deployments
-    const cfMatch = pathname.match(/^\/api\/cloudflare\/pages\/([^/]+)\/deployments$/);
-    if (cfMatch && method === 'GET') { await getCFPageDeployments(res, cfMatch[1]); return; }
-    json(res, 404, { error: `Unknown Cloudflare route: ${pathname}` }); return;
-  }
-
-  // ── PayPal ─────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/paypal/')) {
-    if (pathname === '/api/paypal/transactions' && method === 'GET') { await getPayPalTransactions(res); return; }
-    if (pathname === '/api/paypal/balance'      && method === 'GET') { await getPayPalBalance(res); return; }
-    json(res, 404, { error: `Unknown PayPal route: ${pathname}` }); return;
-  }
-
-  // ── Vercel ─────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/vercel/')) {
-    if (pathname === '/api/vercel/deployments' && method === 'GET') { await route(res, dataVercelDeployments); return; }
-    json(res, 404, { error: `Unknown Vercel route: ${pathname}` }); return;
-  }
-
-  // ── Netlify ────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/netlify/')) {
-    if (pathname === '/api/netlify/deployments' && method === 'GET') { await route(res, dataNetlifyDeployments); return; }
-    json(res, 404, { error: `Unknown Netlify route: ${pathname}` }); return;
+  // ── Provider routes (delegated to provider modules) ───────────────────────
+  const providerBody = await readBody(req);
+  for (const handler of providerHandlers) {
+    const handled = await handler(req, res, url, pathname, method, providerBody);
+    if (handled) return;
   }
 
   // ── Webhook receive (provider → dashboard) ─────────────────────────────────
   // Each route verifies the provider signature then triggers a refresh of the
   // relevant SSE channel so connected tiles get an immediate data update.
   if (pathname.startsWith('/api/webhooks/') && method === 'POST') {
-    const body = await readBody(req);
+    const body = providerBody;
 
     // Helper: trigger an immediate refresh for a channel if a poller is registered.
     const triggerRefresh = (channel: string) => {
@@ -4114,337 +1728,30 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
-  // ── CircleCI ───────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/circleci/')) {
-    if (pathname === '/api/circleci/pipelines' && method === 'GET') { await route(res, dataCircleCIPipelines); return; }
-    if (pathname === '/api/circleci/insights'  && method === 'GET') { await route(res, dataCircleCIInsights); return; }
-    json(res, 404, { error: `Unknown CircleCI route: ${pathname}` }); return;
-  }
-
-  // ── Travis CI ──────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/travis/')) {
-    if (pathname === '/api/travis/builds' && method === 'GET') { await route(res, dataTravisBuilds); return; }
-    json(res, 404, { error: `Unknown Travis route: ${pathname}` }); return;
-  }
-
-  // ── Bitrise ────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/bitrise/')) {
-    if (pathname === '/api/bitrise/builds' && method === 'GET') { await route(res, dataBitriseBuilds); return; }
-    json(res, 404, { error: `Unknown Bitrise route: ${pathname}` }); return;
-  }
-
-  // ── Docker Hub ─────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/dockerhub/')) {
-    if (pathname === '/api/dockerhub/repositories' && method === 'GET') { await route(res, dataDockerHubRepos); return; }
-    json(res, 404, { error: `Unknown DockerHub route: ${pathname}` }); return;
-  }
-
-  // ── SonarQube ──────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/sonarqube/')) {
-    if (pathname === '/api/sonarqube/quality'   && method === 'GET') { await route(res, dataSonarQubeQuality); return; }
-    if (pathname === '/api/sonarqube/measures'  && method === 'GET') { await route(res, dataSonarQubeMeasures); return; }
-    if (pathname === '/api/sonarqube/issues'    && method === 'GET') { await route(res, dataSonarQubeIssues); return; }
-    json(res, 404, { error: `Unknown SonarQube route: ${pathname}` }); return;
-  }
-
-  // ── Azure DevOps ───────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/azuredevops/')) {
-    if (pathname === '/api/azuredevops/pipelines'  && method === 'GET') { await route(res, dataAzurePipelines); return; }
-    if (pathname === '/api/azuredevops/releases'   && method === 'GET') { await route(res, dataAzureReleases); return; }
-    if (pathname === '/api/azuredevops/workitems'  && method === 'GET') { await route(res, dataAzureWorkItems); return; }
-    json(res, 404, { error: `Unknown Azure DevOps route: ${pathname}` }); return;
-  }
-
-  // ── npm ────────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/npm/')) {
-    if (pathname === '/api/npm/downloads' && method === 'GET') { await route(res, dataNpmDownloads); return; }
-    json(res, 404, { error: `Unknown npm route: ${pathname}` }); return;
-  }
-
-  // ── jsDelivr ───────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/jsdelivr/')) {
-    if (pathname === '/api/jsdelivr/hits' && method === 'GET') { await route(res, dataJsDelivrStats); return; }
-    json(res, 404, { error: `Unknown jsDelivr route: ${pathname}` }); return;
-  }
-
-  // ── WakaTime ───────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/wakatime/')) {
-    if (pathname === '/api/wakatime/summary' && method === 'GET') { await route(res, dataWakaTimeSummary); return; }
-    json(res, 404, { error: `Unknown WakaTime route: ${pathname}` }); return;
-  }
-
-  // ── Clockify ───────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/clockify/')) {
-    if (pathname === '/api/clockify/time-entries' && method === 'GET') { await route(res, dataClockifyTimeEntries); return; }
-    json(res, 404, { error: `Unknown Clockify route: ${pathname}` }); return;
-  }
-
-  // ── Linear ─────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/linear/')) {
-    if (pathname === '/api/linear/issues' && method === 'GET') { await route(res, dataLinearIssues); return; }
-    json(res, 404, { error: `Unknown Linear route: ${pathname}` }); return;
-  }
-
-  // ── Jira ───────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/jira/')) {
-    if (pathname === '/api/jira/issues' && method === 'GET') { await route(res, dataJiraIssues); return; }
-    json(res, 404, { error: `Unknown Jira route: ${pathname}` }); return;
-  }
-
-  // ── Slack ──────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/slack/')) {
-    if (pathname === '/api/slack/messages' && method === 'GET') { await route(res, dataSlackMessages); return; }
-    json(res, 404, { error: `Unknown Slack route: ${pathname}` }); return;
-  }
-
-  // ── Discord ────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/discord/')) {
-    if (pathname === '/api/discord/server-stats' && method === 'GET') { await route(res, dataDiscordServerStats); return; }
-    json(res, 404, { error: `Unknown Discord route: ${pathname}` }); return;
-  }
-
-  // ── Mailchimp ──────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/mailchimp/')) {
-    if (pathname === '/api/mailchimp/campaigns' && method === 'GET') { await route(res, dataMailchimpCampaigns); return; }
-    json(res, 404, { error: `Unknown Mailchimp route: ${pathname}` }); return;
-  }
-
-  // ── Google Analytics 4 ────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/ga4/')) {
-    if (pathname === '/api/ga4/sessions' && method === 'GET') { await route(res, dataGA4Sessions); return; }
-    json(res, 404, { error: `Unknown GA4 route: ${pathname}` }); return;
-  }
-
-  // ── Instatus ───────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/instatus/')) {
-    if (pathname === '/api/instatus/overview' && method === 'GET') { await route(res, dataInstatusOverview); return; }
-    json(res, 404, { error: `Unknown Instatus route: ${pathname}` }); return;
-  }
-
-  // ── RSS Feed ──────────────────────────────────────────────────────────────
-  if (pathname === '/api/rss/feed' && method === 'GET') {
-    const qs = new URL(`http://x${req.url ?? ''}`).searchParams;
-    const feedUrl = qs.get('url');
-    if (!feedUrl) { json(res, 400, { error: 'url query param required' }); return; }
-    const maxItems = parseInt(qs.get('maxItems') ?? '50', 10) || 50;
-    try { json(res, 200, await dataRssFeed(decodeURIComponent(feedUrl), maxItems)); } catch (e) { json(res, 500, { error: String(e) }); }
+  // ── Tile data report (client-side tiles → MCP cache) ─────────────────────
+  // POST /api/tiles/:id/data  { data: unknown }
+  // Fire-and-forget from client tiles; stores value in resourceCache so MCP
+  // get_tile_data can serve it. Rate-limited to 1 write/tile/second.
+  if (pathname.startsWith('/api/tiles/') && pathname.endsWith('/data') && method === 'POST') {
+    const tileId = pathname.slice('/api/tiles/'.length, -'/data'.length);
+    if (tileId) {
+      const now = Date.now();
+      const lastKey = `tile-data-ts:${tileId}`;
+      const last = (resourceCache.get(lastKey) as number | undefined) ?? 0;
+      if (now - last >= 1000) {
+        resourceCache.set(lastKey, now);
+        const body = await readBody(req);
+        try {
+          const payload = JSON.parse(body) as { data: unknown };
+          resourceCache.set(tileId, payload.data);
+        } catch { /* malformed body — ignore */ }
+      }
+    }
+    json(res, 200, { ok: true });
     return;
   }
 
-  // ── Hacker News ────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/hackernews/')) {
-    if (pathname === '/api/hackernews/top-stories' && method === 'GET') { await route(res, dataHNTopStories); return; }
-    json(res, 404, { error: `Unknown HackerNews route: ${pathname}` }); return;
-  }
-
-  // ── Alpha Vantage ──────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/alphavantage/')) {
-    if (pathname === '/api/alphavantage/quotes' && method === 'GET') { await route(res, dataAlphaVantageQuotes); return; }
-    if (pathname === '/api/alphavantage/sparklines' && method === 'GET') { await route(res, dataAvSparklines); return; }
-    if (pathname === '/api/alphavantage/market-status' && method === 'GET') { await route(res, dataAvMarketStatus); return; }
-    if (pathname === '/api/alphavantage/market-movers' && method === 'GET') { await route(res, dataAvMarketMovers); return; }
-    if (pathname === '/api/alphavantage/news-sentiment' && method === 'GET') { await route(res, dataAvNewsSentiment); return; }
-    if (pathname === '/api/alphavantage/earnings' && method === 'GET') { await route(res, dataAvEarnings); return; }
-    if (pathname === '/api/alphavantage/earnings-calendar' && method === 'GET') { await route(res, dataAvEarningsCalendar); return; }
-    if (pathname === '/api/alphavantage/fundamentals' && method === 'GET') { await route(res, dataAvFundamentals); return; }
-    if (pathname === '/api/alphavantage/forex-rates' && method === 'GET') { await route(res, dataAvForexRates); return; }
-    if (pathname === '/api/alphavantage/commodities' && method === 'GET') { await route(res, dataAvCommodities); return; }
-    if (pathname === '/api/alphavantage/economic-indicators' && method === 'GET') { await route(res, dataAvEconomicIndicators); return; }
-    if (pathname === '/api/alphavantage/insider-transactions' && method === 'GET') { await route(res, dataAvInsiderTransactions); return; }
-    json(res, 404, { error: `Unknown AlphaVantage route: ${pathname}` }); return;
-  }
-
-  // ── CoinGecko ──────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/coingecko/')) {
-    if (pathname === '/api/coingecko/markets' && method === 'GET') { await route(res, dataCoinGeckoMarkets); return; }
-    if (pathname === '/api/coingecko/global' && method === 'GET') { await route(res, dataCoinGeckoGlobal); return; }
-    if (pathname === '/api/coingecko/trending' && method === 'GET') { await route(res, dataCoinGeckoTrending); return; }
-    if (pathname === '/api/coingecko/price-chart' && method === 'GET') { await route(res, dataCoinGeckoPriceChart); return; }
-    if (pathname === '/api/coingecko/defi' && method === 'GET') { await route(res, dataCoinGeckoDefi); return; }
-    if (pathname === '/api/coingecko/categories' && method === 'GET') { await route(res, dataCoinGeckoCategories); return; }
-    if (pathname === '/api/coingecko/exchanges' && method === 'GET') { await route(res, dataCoinGeckoExchanges); return; }
-    if (pathname === '/api/coingecko/coin-detail' && method === 'GET') { await route(res, dataCoinGeckoCoinDetail); return; }
-    json(res, 404, { error: `Unknown CoinGecko route: ${pathname}` }); return;
-  }
-
-  // ── Finnhub ────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/finnhub/')) {
-    if (pathname === '/api/finnhub/quotes' && method === 'GET') { await route(res, dataFinnhubQuotes); return; }
-    if (pathname === '/api/finnhub/news' && method === 'GET') { await route(res, dataFinnhubNews); return; }
-    if (pathname === '/api/finnhub/company-news' && method === 'GET') { await route(res, dataFinnhubCompanyNews); return; }
-    if (pathname === '/api/finnhub/market-news' && method === 'GET') { await route(res, dataFinnhubMarketNews); return; }
-    if (pathname === '/api/finnhub/earnings-calendar' && method === 'GET') { await route(res, dataFinnhubEarningsCalendar); return; }
-    if (pathname === '/api/finnhub/earnings-surprises' && method === 'GET') { await route(res, dataFinnhubEarningsSurprises); return; }
-    if (pathname === '/api/finnhub/analyst-consensus' && method === 'GET') { await route(res, dataFinnhubAnalystConsensus); return; }
-    if (pathname === '/api/finnhub/fundamentals' && method === 'GET') { await route(res, dataFinnhubFundamentals); return; }
-    if (pathname === '/api/finnhub/market-status' && method === 'GET') { await route(res, dataFinnhubMarketStatus); return; }
-    if (pathname === '/api/finnhub/insider-transactions' && method === 'GET') { await route(res, dataFinnhubInsiderTransactions); return; }
-    if (pathname === '/api/finnhub/insider-sentiment' && method === 'GET') { await route(res, dataFinnhubInsiderSentiment); return; }
-    if (pathname === '/api/finnhub/ipo-calendar' && method === 'GET') { await route(res, dataFinnhubIpoCalendar); return; }
-    if (pathname === '/api/finnhub/sec-filings' && method === 'GET') { await route(res, dataFinnhubSecFilings); return; }
-    if (pathname === '/api/finnhub/company-profile' && method === 'GET') { await route(res, dataFinnhubCompanyProfile); return; }
-    json(res, 404, { error: `Unknown Finnhub route: ${pathname}` }); return;
-  }
-
-  // ── Plaid ──────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/plaid/')) {
-    if (pathname === '/api/plaid/accounts' && method === 'GET') { await route(res, dataPlaidAccounts); return; }
-    if (pathname === '/api/plaid/transactions' && method === 'GET') { await route(res, dataPlaidTransactions); return; }
-    if (pathname === '/api/plaid/investment-portfolio' && method === 'GET') { await route(res, dataPlaidInvestmentPortfolio); return; }
-    if (pathname === '/api/plaid/investment-transactions' && method === 'GET') { await route(res, dataPlaidInvestmentTransactions); return; }
-    if (pathname === '/api/plaid/liabilities-overview' && method === 'GET') { await route(res, dataPlaidLiabilities); return; }
-    if (pathname === '/api/plaid/credit-card-details' && method === 'GET') { await route(res, dataPlaidCreditCards); return; }
-    if (pathname === '/api/plaid/mortgage-tracker' && method === 'GET') { await route(res, dataPlaidMortgage); return; }
-    if (pathname === '/api/plaid/statements' && method === 'GET') { await route(res, dataPlaidStatements); return; }
-    json(res, 404, { error: `Unknown Plaid route: ${pathname}` }); return;
-  }
-
-  // ── HaveIBeenPwned ─────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/hibp/')) {
-    if (pathname === '/api/hibp/breaches' && method === 'GET') { await route(res, dataHibpBreaches); return; }
-    json(res, 404, { error: `Unknown HIBP route: ${pathname}` }); return;
-  }
-
-  // ── VirusTotal ─────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/virustotal/')) {
-    if (pathname === '/api/virustotal/analyses' && method === 'GET') { await route(res, dataVirusTotalAnalyses); return; }
-    json(res, 404, { error: `Unknown VirusTotal route: ${pathname}` }); return;
-  }
-
-  // ── Shodan ─────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/shodan/')) {
-    if (pathname === '/api/shodan/search' && method === 'GET') { await route(res, dataShodanSearch); return; }
-    json(res, 404, { error: `Unknown Shodan route: ${pathname}` }); return;
-  }
-
-  // ── WooCommerce ────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/woocommerce/')) {
-    if (pathname === '/api/woocommerce/orders' && method === 'GET') { await route(res, dataWooCommerceOrders); return; }
-    if (pathname === '/api/woocommerce/sales-summary' && method === 'GET') { await route(res, dataWooSalesSummary); return; }
-    if (pathname === '/api/woocommerce/top-sellers' && method === 'GET') { await route(res, dataWooTopSellers); return; }
-    json(res, 404, { error: `Unknown WooCommerce route: ${pathname}` }); return;
-  }
-
-  // ── Shopify ────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/shopify/')) {
-    if (pathname === '/api/shopify/orders' && method === 'GET') { await route(res, dataShopifyOrders); return; }
-    if (pathname === '/api/shopify/products' && method === 'GET') { await route(res, dataShopifyProducts); return; }
-    json(res, 404, { error: `Unknown Shopify route: ${pathname}` }); return;
-  }
-
-  // ── Reddit ─────────────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/reddit/')) {
-    if (pathname === '/api/reddit/posts' && method === 'GET') { await route(res, dataRedditPosts); return; }
-    json(res, 404, { error: `Unknown Reddit route: ${pathname}` }); return;
-  }
-
-  // ── Product Hunt ───────────────────────────────────────────────────────────
-  if (pathname.startsWith('/api/producthunt/')) {
-    if (pathname === '/api/producthunt/launches' && method === 'GET') { await route(res, dataProductHuntLaunches); return; }
-    json(res, 404, { error: `Unknown ProductHunt route: ${pathname}` }); return;
-  }
-
-  if (!pathname.startsWith('/api/stripe/')) { json(res, 404, { error: 'Not found' }); return; }
-
-  // Special SSE / ingest routes
-  if (pathname === '/api/stripe/webhooks/stream') { handleWebhookStream(req, res); return; }
-  if (pathname === '/api/stripe/webhooks/ingest' && method === 'POST') { await handleWebhookIngest(req, res); return; }
-
-  // ── Order workflow statuses (local, no Stripe needed) ────────────────────
-  if (pathname === '/api/stripe/orders/statuses' && method === 'GET') {
-    json(res, 200, readStatuses()); return;
-  }
-  if (pathname.startsWith('/api/stripe/orders/') && pathname.endsWith('/status') && method === 'PATCH') {
-    const orderId = pathname.slice('/api/stripe/orders/'.length, -'/status'.length);
-    const rawBody = await readBody(req);
-    const { status, note } = JSON.parse(rawBody || '{}') as { status?: OrderWorkflowStatus; note?: string };
-    const valid: OrderWorkflowStatus[] = ['new', 'processing', 'packing', 'shipped', 'done'];
-    if (!status || !valid.includes(status)) { json(res, 400, { error: 'Invalid status' }); return; }
-    const entry: OrderStatusEntry = { status, updatedAt: Math.floor(Date.now() / 1000), ...(note !== undefined ? { note } : {}) };
-    writeStatus(orderId, entry);
-    json(res, 200, entry); return;
-  }
-
-  const stripe = getStripe();
-  if (!stripe) { noStripe(res); return; }
-
-  // Parse path: /api/stripe/<resource>[/<id>[/<action>]]
-  const rest = pathname.slice('/api/stripe/'.length); // e.g. "payments/ch_123/refund"
-  const parts = rest.split('/').filter(Boolean);      // ["payments", "ch_123", "refund"]
-  const [resource, id, action] = parts;
-
-  const body = (method === 'POST' || method === 'PATCH' || method === 'DELETE')
-    ? await readBody(req)
-    : '';
-
-  try {
-    // ── payments ─────────────────────────────────────────────────────────────
-    if (resource === 'payments') {
-      if (!id && method === 'GET') { await getPayments(stripe, res); return; }
-      if (id && !action && method === 'GET') { await getPayment(stripe, res, id); return; }
-      if (id && action === 'refund' && method === 'POST') { await refundPayment(stripe, res, id, body); return; }
-      if (id && action === 'capture' && method === 'POST') { await capturePayment(stripe, res, id); return; }
-      if (id && action === 'cancel' && method === 'POST') { await cancelPayment(stripe, res, id); return; }
-    }
-
-    // ── products ─────────────────────────────────────────────────────────────
-    if (resource === 'products') {
-      if (!id && method === 'GET') { await getProducts(stripe, res); return; }
-      if (!id && method === 'POST') { await createProduct(stripe, res, body); return; }
-      if (id && !action && method === 'GET') { await getProduct(stripe, res, id); return; }
-      if (id && !action && method === 'PATCH') { await updateProduct(stripe, res, id, body); return; }
-      if (id && !action && method === 'DELETE') { await deleteProduct(stripe, res, id); return; }
-      if (id && action === 'prices' && method === 'GET') { await getProductPrices(stripe, res, id); return; }
-    }
-
-    // ── prices ───────────────────────────────────────────────────────────────
-    if (resource === 'prices') {
-      if (!id && method === 'POST') { await createPrice(stripe, res, body); return; }
-      if (id && method === 'PATCH') { await updatePrice(stripe, res, id, body); return; }
-    }
-
-    // ── subscriptions ─────────────────────────────────────────────────────────
-    if (resource === 'subscriptions') {
-      if (!id && method === 'GET') { await getSubscriptions(stripe, res); return; }
-      if (id && !action && method === 'GET') { await getSubscription(stripe, res, id); return; }
-      if (id && !action && method === 'PATCH') { await updateSubscription(stripe, res, id, body); return; }
-      if (id && !action && method === 'DELETE') { await cancelSubscription(stripe, res, id, body); return; }
-      if (id && action === 'resume' && method === 'POST') { await resumeSubscription(stripe, res, id); return; }
-    }
-
-    // ── customers ─────────────────────────────────────────────────────────────
-    if (resource === 'customers') {
-      if (!id && method === 'GET') { await getCustomers(stripe, res); return; }
-      if (id === 'list' && method === 'GET') { await getCustomerList(stripe, res); return; }
-      if (id && id !== 'list' && !action && method === 'GET') { await getCustomer(stripe, res, id); return; }
-      if (id && !action && method === 'PATCH') { await updateCustomer(stripe, res, id, body); return; }
-      if (id && !action && method === 'DELETE') { await deleteCustomer(stripe, res, id); return; }
-    }
-
-    // ── invoices ──────────────────────────────────────────────────────────────
-    if (resource === 'invoices') {
-      if (!id && method === 'GET') { await getInvoices(stripe, res); return; }
-      if (id && !action && method === 'GET') { await getInvoice(stripe, res, id); return; }
-      if (id && action === 'finalize' && method === 'POST') { await finalizeInvoice(stripe, res, id); return; }
-      if (id && action === 'pay' && method === 'POST') { await payInvoice(stripe, res, id); return; }
-      if (id && action === 'void' && method === 'POST') { await voidInvoice(stripe, res, id); return; }
-      if (id && action === 'send' && method === 'POST') { await sendInvoice(stripe, res, id); return; }
-    }
-
-    // ── refunds ───────────────────────────────────────────────────────────────
-    if (resource === 'refunds') {
-      if (!id && method === 'GET') { await getRefunds(stripe, res); return; }
-      if (!id && method === 'POST') { await createRefund(stripe, res, body); return; }
-    }
-
-    // ── legacy list routes for existing tiles ─────────────────────────────────
-    if (resource === 'webhooks' && !id && method === 'GET') { await getWebhookEvents(stripe, res); return; }
-    if (resource === 'revenue' && method === 'GET') { await getRevenue(stripe, res); return; }
-
-    json(res, 404, { error: `Unknown route: ${method} /api/stripe/${rest}` });
-  } catch (err) {
-    json(res, 500, { error: err instanceof Error ? err.message : 'Unknown error' });
-  }
+  json(res, 404, { error: 'Not found' });
 }
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────

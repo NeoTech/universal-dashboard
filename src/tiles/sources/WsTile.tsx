@@ -5,6 +5,7 @@ import { useTileRefresh } from '../TileRefreshContext';
 import { sseReceivedAt, setSseRevision } from '../../ui/useSseChannel';
 import { BaseTile } from '../BaseTile';
 import { MiniChart } from '../../ui/MiniChart';
+import { API_BASE_URL } from '../../data/api';
 
 /** Traverse dot-path like "payload.price" on an arbitrary object. */
 function getField(obj: unknown, path: string): string {
@@ -71,6 +72,9 @@ export function WsTile(props: Props): JSX.Element {
     readStoredBuffer(props.tileId, props.config.chartField)
   );
   const [chartView, setChartView] = createSignal<'chart' | 'data'>(readStoredView(props.tileId));
+
+  // Debounce timer ref for tile data reporting (TWM-139)
+  let reportTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Set chart view and persist to sessionStorage. */
   function pickView(v: 'chart' | 'data'): void {
@@ -165,6 +169,18 @@ export function WsTile(props: Props): JSX.Element {
         }
         sseReceivedAt.set('websocket', Date.now());
         setSseRevision(r => r + 1);
+        // TWM-139: debounced report of latest message to MCP cache (2s)
+        if (props.tileId) {
+          clearTimeout(reportTimer);
+          reportTimer = setTimeout(() => {
+            const jwt = typeof localStorage !== 'undefined' ? localStorage.getItem('twm-jwt') : null;
+            void fetch(`${API_BASE_URL}/api/tiles/${props.tileId}/data`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
+              body: JSON.stringify({ data: parsed }),
+            }).catch(() => { /* fire-and-forget */ });
+          }, 2000);
+        }
         if (listEl) listEl.scrollTop = listEl.scrollHeight;
       };
     }
@@ -174,6 +190,7 @@ export function WsTile(props: Props): JSX.Element {
     onCleanup(() => {
       destroyed = true;
       if (retryTimer !== null) clearTimeout(retryTimer);
+      clearTimeout(reportTimer);
       ws?.close();
     });
   });

@@ -89,16 +89,16 @@ export function renderTile(tile: TileConfig): JSX.Element {
     }
   }
   if (tile.type === 'rest' && tile.rest) {
-    return <RestTile config={tile.rest} />;
+    return <RestTile config={tile.rest} tileId={tile.id} />;
   }
   if (tile.type === 'websocket' && tile.ws) {
     return <WsTile config={tile.ws} tileId={tile.id} />;
   }
   if (tile.type === 'custom-api') {
-    return <CustomApiTile config={tile.customApi ?? { url: '' }} />;
+    return <CustomApiTile config={tile.customApi ?? { url: '' }} tileId={tile.id} />;
   }
   if (tile.type === 'graphql') {
-    return <GraphqlTile config={tile.graphql ?? { url: '', query: '' }} />;
+    return <GraphqlTile config={tile.graphql ?? { url: '', query: '' }} tileId={tile.id} />;
   }
   return <div class="tile-unknown">Unknown tile type: {tile.type}</div>;
 }

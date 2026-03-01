@@ -34,9 +34,18 @@ export function clearTileLayout(workspaceName: string): void {
  * Load a tile layout from the server for the current authenticated user.
  * Returns null if not found or on error (caller should fall back to localStorage).
  */
+function getAuthHeaders(): Record<string, string> {
+  try {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('twm-jwt') : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch { return {}; }
+}
+
 export async function loadLayoutFromServer(workspaceName: string, apiBase: string): Promise<TileConfig[] | null> {
   try {
-    const res = await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`);
+    const res = await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) return null;
     const data = await res.json() as { tiles: TileConfig[] | null };
     return data.tiles;
@@ -53,7 +62,7 @@ export async function saveLayoutToServer(workspaceName: string, tiles: TileConfi
   try {
     await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ tiles }),
     });
   } catch {

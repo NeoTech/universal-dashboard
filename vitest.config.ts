@@ -32,7 +32,7 @@ export default mergeConfig(
           '**/index.ts',
         ],
       },
-      include: ['src/**/__tests__/**/*.test.{ts,tsx}'],
+      include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'api/providers/__tests__/**/*.test.ts'],
     },
   }),
 );

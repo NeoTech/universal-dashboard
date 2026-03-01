@@ -8,6 +8,7 @@ import { usePagination, PaginationBar } from '../usePagination';
 
 interface Props {
   config: CustomApiTileConfig;
+  tileId?: string;
 }
 
 type DisplayMode = 'table' | 'json' | 'text' | 'key-value';
@@ -144,6 +145,14 @@ export function CustomApiTile(props: Props): JSX.Element {
         );
       }
       setData(extracted);
+      if (props.tileId) {
+        const jwt = typeof localStorage !== 'undefined' ? localStorage.getItem('twm-jwt') : null;
+        void fetch(`${API_BASE_URL}/api/tiles/${props.tileId}/data`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
+          body: JSON.stringify({ data: extracted }),
+        }).catch(() => { /* fire-and-forget */ });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch');
     } finally {

@@ -1,4 +1,4 @@
-import { createSignal, onMount, Show } from 'solid-js';
+import { createSignal, createEffect, onMount, untrack, Show } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { TileGrid } from '../tiles/TileGrid';
 import { AddTileModal } from '../tiles/AddTileModal';
@@ -9,6 +9,7 @@ import { makeTile } from '../tiles/TileConfig';
 import type { TileConfig, TileType } from '../tiles/TileConfig';
 import { TILE_SSE_CHANNEL, WEBHOOK_CAPABLE } from '../tiles/TileConfig';
 import { saveTileLayout, loadTileLayout, loadLayoutFromServer, saveLayoutToServer } from '../tiles/tilePersistence';
+import { useSseChannel } from '../ui/useSseChannel';
 import { API_BASE_URL } from '../data/api';
 import { useAuth } from '../ui/AuthContext';
 
@@ -92,6 +93,35 @@ export function DashboardPanel(props: Props): JSX.Element {
   /** Position pre-seeded from a double-click on empty canvas. Cleared after use. */
   const [addAtPosition, setAddAtPosition] = createSignal<{ x: number; y: number } | null>(null);
 
+  // ── MCP / SSE-driven layout changes ─────────────────────────────────────
+  // tile-op: targeted add / remove / update broadcast by MCP tools
+  type TileOp = { op: 'add'; tile: TileConfig } | { op: 'remove'; id: string } | { op: 'update'; id: string; patch: Partial<TileConfig> };
+  const { data: tileOp } = useSseChannel<TileOp | null>('tile-op', null);
+  createEffect(() => {
+    const op = tileOp();
+    if (!op) return;
+    // Read tiles() inside untrack so it is NOT a reactive dependency of this
+    // effect. Without untrack, any change to tiles() (remove, drag, configure)
+    // would re-run this effect and re-apply the last MCP op — e.g. re-adding a
+    // tile the user just removed.
+    const current = untrack(tiles);
+    let updated: TileConfig[];
+    if (op.op === 'add') {
+      // Deduplicate: skip if a tile with this id already exists (guards against any future replay)
+      if (current.some((t) => t.id === op.tile.id)) return;
+      updated = [...current, op.tile];
+    } else if (op.op === 'remove') {
+      updated = current.filter((t) => t.id !== op.id);
+    } else if (op.op === 'update') {
+      updated = current.map((t) => t.id === op.id ? { ...t, ...op.patch, id: t.id } as TileConfig : t);
+    } else {
+      return;
+    }
+    setTiles(updated);
+    saveTileLayout(workspaceName(), updated);
+    if (auth.isAuthenticated()) void saveLayoutToServer(workspaceName(), updated, API_BASE_URL);
+  });
+
   const configuringTile = () => {
     const id = configuringTileId();
     return id ? tiles().find((t) => t.id === id) ?? null : null;
@@ -112,12 +142,16 @@ export function DashboardPanel(props: Props): JSX.Element {
     setTiles(initial);
 
     // If authenticated, try to hydrate from the server (may be more up-to-date
-    // if another device saved a layout). Server wins if it has a layout.
+    // if another device saved a layout). Server wins only when localStorage is
+    // empty — this prevents stale server data from overwriting a valid local layout.
     if (auth.isAuthenticated()) {
       void loadLayoutFromServer(workspaceName(), API_BASE_URL).then((serverTiles) => {
-        if (serverTiles) {
+        if (serverTiles && serverTiles.length > 0 && !local) {
           setTiles(serverTiles);
           saveTileLayout(workspaceName(), serverTiles); // keep localStorage in sync
+        } else if (local && local.length > 0) {
+          // Push local layout to server so it stays in sync
+          void saveLayoutToServer(workspaceName(), local, API_BASE_URL);
         }
       });
     }
@@ -313,6 +347,20 @@ export function DashboardPanel(props: Props): JSX.Element {
             onClick={() => setClearPending(true)}
           >
             Clear
+          </button>
+          <button
+            class="btn btn--neutral btn--sm"
+            title="Copy your JWT to clipboard (for MCP / API access)"
+            onClick={() => {
+              const token = localStorage.getItem('twm-jwt');
+              if (token) {
+                void navigator.clipboard.writeText(token);
+              } else {
+                alert('No JWT found — are you logged in?');
+              }
+            }}
+          >
+            Copy JWT
           </button>
           {/* Hidden file picker for import */}
           <input

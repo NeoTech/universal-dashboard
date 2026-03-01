@@ -1,6 +1,10 @@
 # Tiling Window Manager Dashboard
 
+[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic_2.0-blue.svg)](LICENSE)
+
 A developer dashboard built with SolidJS + Bun that aggregates data from dozens of API providers into a customisable tiled layout. Tiles are arranged freely on a freeform canvas, persisted per workspace, and pushed live data via Server-Sent Events (SSE) from a local API server.
+
+![Dashboard example](example.png)
 
 ## Quick start
 

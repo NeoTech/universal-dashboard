@@ -17,10 +17,6 @@ dist
 dist-ssr
 *.local
 
-.github/tasks/lessons.md
-.github/copilot-instructions.md
-.github/tasks/todo.md
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

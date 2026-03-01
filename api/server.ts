@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHmac, randomBytes, pbkdf2Sync } from 'node:crypto';
 import { authDb } from './db.ts';
 import { buildAuthnRequest, deflateEncode, buildSpMetadata, verifySamlResponse, parseIdpMetadata } from './saml.ts';
-import { readLayout, writeLayout, listWorkspaces } from './mcp-layout.ts';
+import { readLayout, writeLayout, listWorkspaces, hasActiveTiles, CHANNEL_TO_TILE_TYPES } from './mcp-layout.ts';
 import type { ProviderRouteHandler, ServerContext } from './providers/types.ts';
 import { register as registerStripe, getStripe } from './providers/stripe.ts';
 import { register as registerGithub } from './providers/github.ts';
@@ -556,6 +556,10 @@ function startPollers(): void {
     console.log(`  [poll] registered  ${event.padEnd(32)}  ${isWebhook ? '(WEBHOOK — polling suspended)' : `every ${fmtMs(effectiveMs)}${pausedPollers.has(event) ? '  (PAUSED)' : ''}` }`);
 
     const run = () => {
+      if (!hasActiveTiles(event)) {
+        console.log(`  [poll] skip       ${event.padEnd(32)}  (no active tiles)`);
+        return Promise.resolve();
+      }
       const t0 = Date.now();
       console.log(`  [poll] fetching    ${event}`);
       return fn()
@@ -984,9 +988,26 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
         writeLayout(jwtUser.sub, ws, layout);
       }
       broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
-      // If a reddit tile was added, refresh the poller so it picks up the new subreddit.
-      if (typeof tileType === 'string' && ['reddit-posts','reddit-hot-posts','reddit-keyword-monitor'].includes(tileType)) {
-        void refreshRegistry.get('reddit-posts')?.();
+      // Trigger an immediate poll for any channel that now has its first tile.
+      // This ensures the tile gets data without waiting for the next interval.
+      if (typeof tileType === 'string') {
+        // Build reverse mapping: tile type → channel(s)
+        const channelsForType: string[] = [];
+        for (const [ch, types] of Object.entries(CHANNEL_TO_TILE_TYPES)) {
+          if (types.includes(tileType)) channelsForType.push(ch);
+        }
+        // Fall back to channel name == tile type when not in the exceptions map.
+        if (channelsForType.length === 0) channelsForType.push(tileType);
+        for (const ch of channelsForType) {
+          if (!resourceCache.has(ch)) {
+            // No cached data yet — fire immediately so the tile doesn't spin.
+            void refreshRegistry.get(ch)?.();
+          }
+        }
+        // Reddit tiles must always refresh so the poller picks up the new subreddit.
+        if (['reddit-posts', 'reddit-hot-posts', 'reddit-keyword-monitor'].includes(tileType)) {
+          void refreshRegistry.get('reddit-posts')?.();
+        }
       }
       return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, tile: newTile }, null, 2) }] });
     }

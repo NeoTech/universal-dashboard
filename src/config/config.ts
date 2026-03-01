@@ -3,14 +3,7 @@
 export interface TwmKeybindings {
   nextDashboard: string;
   prevDashboard: string;
-  closePanel: string;
-  focusLeft: string;
-  focusRight: string;
-  focusUp: string;
-  focusDown: string;
   openPalette: string;
-  nextWorkspace: string;
-  prevWorkspace: string;
   undo: string;
   redo: string;
   help: string;
@@ -36,14 +29,7 @@ export const DEFAULT_CONFIG: Readonly<TwmConfig> = {
   keybindings: {
     nextDashboard:   'mod+arrowright',
     prevDashboard:   'mod+arrowleft',
-    closePanel:      'mod+shift+q',
-    focusLeft:       'mod+h',
-    focusRight:      'mod+l',
-    focusUp:         'mod+k',
-    focusDown:       'mod+j',
     openPalette:     'mod+p',
-    nextWorkspace:   'mod+]',
-    prevWorkspace:   'mod+[',
     undo:            'mod+z',
     redo:            'mod+shift+z',
     help:            '?',

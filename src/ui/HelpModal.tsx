@@ -44,13 +44,6 @@ const KB_ROWS: KbRow[] = [
   { action: 'Redo',               description: 'Redo the last undone action',                key: 'redo' },
   { action: 'Next dashboard',     description: 'Switch to the next dashboard (wraps around)',key: 'nextDashboard' },
   { action: 'Previous dashboard', description: 'Switch to the previous dashboard',           key: 'prevDashboard' },
-  { action: 'Next workspace',     description: 'Switch to the next workspace',               key: 'nextWorkspace' },
-  { action: 'Previous workspace', description: 'Switch to the previous workspace',           key: 'prevWorkspace' },
-  { action: 'Focus left',         description: 'Move panel focus to the left split',         key: 'focusLeft' },
-  { action: 'Focus right',        description: 'Move panel focus to the right split',        key: 'focusRight' },
-  { action: 'Focus up',           description: 'Move panel focus to the upper split',        key: 'focusUp' },
-  { action: 'Focus down',         description: 'Move panel focus to the lower split',        key: 'focusDown' },
-  { action: 'Close panel',        description: 'Close the focused panel',                    key: 'closePanel' },
 ];
 
 const INTERACTIONS: { action: string; description: string }[] = [

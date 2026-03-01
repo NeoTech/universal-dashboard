@@ -91,3 +91,48 @@ export function getRedditMaxFetchLimit(): number {
 export function writeLayout(userId: number, workspace: string, tiles: unknown[]): void {
   stmtUpsertLayout.run(userId, workspace, JSON.stringify(tiles), Math.floor(Date.now() / 1000));
 }
+
+// ── Tile-aware polling helpers ────────────────────────────────────────────────
+
+/**
+ * Maps SSE channel names to the tile type(s) that consume them.
+ * Only exceptions are listed — channels where the name differs from the tile
+ * type, or where multiple tile types share the same channel.
+ * Exported so server.ts can build the reverse mapping without duplication.
+ */
+export const CHANNEL_TO_TILE_TYPES: Record<string, string[]> = {
+  'github-runs':         ['github-actions'],
+  'cf-pages':            ['cloudflare-pages'],
+  'cf-workers':          ['cloudflare-functions'],
+  'paypal-data':         ['paypal-transactions'],
+  'coingecko-markets':   ['coingecko-prices'],
+  'hibp-breaches':       ['hibp-breach-status', 'hibp-recent-breaches'],
+  'plaid-accounts':      ['plaid-balances'],
+  'shodan-search':       ['shodan-exposed-services', 'shodan-vuln-summary'],
+  'virustotal-analyses': ['virustotal-domain-threats', 'virustotal-url-scan'],
+  'hn-top-stories':      ['hn-top-stories', 'hn-mentions'],
+  'reddit-posts':        ['reddit-posts', 'reddit-hot-posts', 'reddit-keyword-monitor'],
+};
+
+const stmtAllLayouts = authDb.prepare<{ tiles_json: string }, []>(
+  'SELECT tiles_json FROM tile_layouts',
+);
+
+/**
+ * Return true if at least one tile consuming `channel` exists in any workspace
+ * across all users.  Used by the poll loop to skip external API calls when no
+ * tile is currently displaying that channel's data.
+ */
+export function hasActiveTiles(channel: string): boolean {
+  const types = CHANNEL_TO_TILE_TYPES[channel] ?? [channel];
+  const typeSet = new Set(types);
+  for (const row of stmtAllLayouts.all()) {
+    let tiles: unknown[];
+    try { tiles = JSON.parse(row.tiles_json) as unknown[]; } catch { continue; }
+    for (const tile of tiles) {
+      const t = tile as Record<string, unknown>;
+      if (typeSet.has(t['type'] as string)) return true;
+    }
+  }
+  return false;
+}

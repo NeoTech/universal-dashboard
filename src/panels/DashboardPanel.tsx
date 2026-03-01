@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onMount, untrack, Show } from 'solid-js';
+import { createSignal, createEffect, onMount, onCleanup, untrack, Show } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { TileGrid } from '../tiles/TileGrid';
 import { AddTileModal } from '../tiles/AddTileModal';
@@ -93,13 +93,21 @@ export function DashboardPanel(props: Props): JSX.Element {
   /** Position pre-seeded from a double-click on empty canvas. Cleared after use. */
   const [addAtPosition, setAddAtPosition] = createSignal<{ x: number; y: number } | null>(null);
 
+  // ── Lifecycle: abort inflight server requests on unmount ─────────────────
+  const abortController = new AbortController();
+  let disposed = false;
+  onCleanup(() => { disposed = true; abortController.abort(); });
+
   // ── MCP / SSE-driven layout changes ─────────────────────────────────────
   // tile-op: targeted add / remove / update broadcast by MCP tools
-  type TileOp = { op: 'add'; tile: TileConfig } | { op: 'remove'; id: string } | { op: 'update'; id: string; patch: Partial<TileConfig> };
+  type TileOp = { op: 'add'; tile: TileConfig; workspace?: string } | { op: 'remove'; id: string; workspace?: string } | { op: 'update'; id: string; patch: Partial<TileConfig>; workspace?: string };
   const { data: tileOp } = useSseChannel<TileOp | null>('tile-op', null);
   createEffect(() => {
     const op = tileOp();
     if (!op) return;
+    if (disposed) return;
+    // Ignore ops targeting a different workspace (all dashboards share one SSE stream)
+    if (op.workspace && op.workspace !== workspaceName()) return;
     // Read tiles() inside untrack so it is NOT a reactive dependency of this
     // effect. Without untrack, any change to tiles() (remove, drag, configure)
     // would re-run this effect and re-apply the last MCP op — e.g. re-adding a
@@ -118,8 +126,10 @@ export function DashboardPanel(props: Props): JSX.Element {
       return;
     }
     setTiles(updated);
+    // Only save to localStorage. The server already has the correct state from
+    // the MCP write — pushing back would be redundant and risks data-loss races
+    // when multiple MCP ops fire in quick succession.
     saveTileLayout(workspaceName(), updated);
-    if (auth.isAuthenticated()) void saveLayoutToServer(workspaceName(), updated, API_BASE_URL);
   });
 
   const configuringTile = () => {
@@ -141,17 +151,44 @@ export function DashboardPanel(props: Props): JSX.Element {
     const initial = local ?? defaultTiles();
     setTiles(initial);
 
-    // If authenticated, try to hydrate from the server (may be more up-to-date
-    // if another device saved a layout). Server wins only when localStorage is
-    // empty — this prevents stale server data from overwriting a valid local layout.
+    const signal = abortController.signal;
+
+    // If authenticated, hydrate from server and reconcile with localStorage.
+    // localStorage is source of truth, but server may have tiles added by MCP
+    // while the client was offline — those get merged in.
     if (auth.isAuthenticated()) {
-      void loadLayoutFromServer(workspaceName(), API_BASE_URL).then((serverTiles) => {
-        if (serverTiles && serverTiles.length > 0 && !local) {
-          setTiles(serverTiles);
-          saveTileLayout(workspaceName(), serverTiles); // keep localStorage in sync
-        } else if (local && local.length > 0) {
-          // Push local layout to server so it stays in sync
-          void saveLayoutToServer(workspaceName(), local, API_BASE_URL);
+      void loadLayoutFromServer(workspaceName(), API_BASE_URL, signal).then((serverTiles) => {
+        if (disposed) return;
+        const hasLocal = local !== null && local.length > 0;
+        const hasServer = serverTiles !== null && serverTiles.length > 0;
+
+        if (hasServer && hasLocal) {
+          // Merge: keep local as base, add any server-side tiles not in local
+          // (e.g. tiles added by MCP while client was offline).
+          const localIds = new Set(local!.map((t) => t.id));
+          const serverOnly = serverTiles!.filter((t) => !localIds.has(t.id));
+          if (serverOnly.length > 0) {
+            const merged = [...local!, ...serverOnly];
+            setTiles(merged);
+            saveTileLayout(workspaceName(), merged);
+            void saveLayoutToServer(workspaceName(), merged, API_BASE_URL, signal);
+          } else {
+            // Local is up-to-date — push to server to keep mirror in sync
+            void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal);
+          }
+        } else if (hasServer && !hasLocal) {
+          // No local data — server wins (e.g. fresh browser / cleared storage)
+          setTiles(serverTiles!);
+          saveTileLayout(workspaceName(), serverTiles!);
+        } else if (hasLocal) {
+          // Only local data — push to server
+          void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal);
+        } else {
+          // Neither has data — persist defaults to both stores
+          const defaults = defaultTiles();
+          setTiles(defaults);
+          saveTileLayout(workspaceName(), defaults);
+          void saveLayoutToServer(workspaceName(), defaults, API_BASE_URL, signal);
         }
       });
     }
@@ -165,6 +202,7 @@ export function DashboardPanel(props: Props): JSX.Element {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings }),
+        signal,
       });
     }
 
@@ -182,6 +220,7 @@ export function DashboardPanel(props: Props): JSX.Element {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'webhook' }),
+        signal,
       });
     }
   });

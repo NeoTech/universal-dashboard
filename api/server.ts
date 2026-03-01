@@ -12,9 +12,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHmac, randomBytes, pbkdf2Sync } from 'node:crypto';
-import { Database } from 'bun:sqlite';
+import { authDb } from './db.ts';
 import { buildAuthnRequest, deflateEncode, buildSpMetadata, verifySamlResponse, parseIdpMetadata } from './saml.ts';
-import { readLayout, writeLayout } from './mcp-layout.ts';
+import { readLayout, writeLayout, listWorkspaces } from './mcp-layout.ts';
 import type { ProviderRouteHandler, ServerContext } from './providers/types.ts';
 import { register as registerStripe, getStripe } from './providers/stripe.ts';
 import { register as registerGithub } from './providers/github.ts';
@@ -59,7 +59,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ── .env file paths ───────────────────────────────────────────────────────────
 const ENV_PATH          = join(__dirname, '..', '.env');
 const POLL_SETTINGS_PATH = join(__dirname, '..', 'poll-settings.json');
-const AUTH_DB_PATH       = join(__dirname, '..', 'auth.db');
 
 /** Parse an env file string into a key→value record (comments/blanks ignored). */
 function parseEnvFile(content: string): Record<string, string> {
@@ -119,21 +118,7 @@ function patchEnvFile(existing: string, updates: Record<string, string>): string
 }
 
 
-// ── Auth database ──────────────────────────────────────────────────────────────
-const authDb = new Database(AUTH_DB_PATH, { create: true });
-authDb.run(`CREATE TABLE IF NOT EXISTS users (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT    UNIQUE NOT NULL COLLATE NOCASE,
-  password_hash TEXT NOT NULL,
-  created_at    INTEGER NOT NULL DEFAULT (unixepoch())
-)`);
-authDb.run(`CREATE TABLE IF NOT EXISTS tile_layouts (
-  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  workspace    TEXT    NOT NULL,
-  tiles_json   TEXT    NOT NULL,
-  updated_at   INTEGER NOT NULL,
-  PRIMARY KEY (user_id, workspace)
-)`);
+// ── Auth database (imported from db.ts) ──────────────────────────────────────
 
 // JWT secret: stable across restarts only if JWT_SECRET is in .env.
 const JWT_SECRET: string = process.env['JWT_SECRET'] ?? (() => {
@@ -252,8 +237,9 @@ function verifyPassword(password: string, stored: string): boolean {
 // Prepared auth statements
 const stmtFindUser    = authDb.prepare<{ id: number; username: string; password_hash: string }, [string]>('SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE');
 const stmtInsertUser  = authDb.prepare<{ id: number }, [string, string]>('INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id');
-const stmtGetLayout   = authDb.prepare<{ tiles_json: string }, [number, string]>('SELECT tiles_json FROM tile_layouts WHERE user_id = ? AND workspace = ?');
+const stmtGetLayout    = authDb.prepare<{ tiles_json: string }, [number, string]>('SELECT tiles_json FROM tile_layouts WHERE user_id = ? AND workspace = ?');
 const stmtUpsertLayout = authDb.prepare<void, [number, string, string, number]>('INSERT INTO tile_layouts (user_id, workspace, tiles_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, workspace) DO UPDATE SET tiles_json=excluded.tiles_json, updated_at=excluded.updated_at');
+const stmtDeleteLayout = authDb.prepare<void, [number, string]>('DELETE FROM tile_layouts WHERE user_id = ? AND workspace = ?');
 
 // ── Provider base-URL overrides (for local mocks / enterprise endpoints) ──────
 const STRIPE_API_URL     = process.env['STRIPE_API_URL']     ?? 'https://api.stripe.com';
@@ -285,14 +271,6 @@ function readBody(req: IncomingMessage): Promise<string> {
 // ── Shared SSE broadcast infrastructure ──────────────────────────────────────
 const sseClients = new Set<ServerResponse>();
 const resourceCache = new Map<string, unknown>();
-
-/**
- * Server-side shadow of the dashboard tile layout, kept in sync by the MCP
- * add_tile / remove_tile / update_tile tools. Initialised from the DB on the
- * first authenticated add_tile call. Used by list_tiles so it always has an
- * accurate view regardless of whether the MCP client passes a JWT.
- */
-let mcpLayout: Record<string, unknown>[] = [];
 
 /** Route handlers registered by provider modules — populated by startPollers(). */
 const providerHandlers: ProviderRouteHandler[] = [];
@@ -537,7 +515,7 @@ const CHANNEL_ENV_MAP: Record<string, string[]> = {
   'shopify-orders':                   ['SHOPIFY_SHOP', 'SHOPIFY_ACCESS_TOKEN'],
   'shopify-products':                 ['SHOPIFY_SHOP', 'SHOPIFY_ACCESS_TOKEN'],
   // Social
-  'reddit-posts':                     ['REDDIT_SUBREDDITS or REDDIT_KEYWORDS'],
+  'reddit-posts':                     [], // subreddits configured per-tile; REDDIT_SUBREDDITS is optional fallback
   // Note: reddit-hot-posts and reddit-keyword-monitor are UI aliases for
   // reddit-posts via TILE_SSE_CHANNEL — they share the same poller and
   // env-status lookup, so they do not need separate entries here.
@@ -876,7 +854,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
             type: 'object',
             properties: {
               type:      { type: 'string',  description: 'Tile type (e.g. "ws", "stripe-payments")' },
-              config:    { type: 'object',  description: 'Provider-specific config' },
+              config:    { type: 'object',  description: 'Provider-specific config. For reddit tile types (reddit-hot-posts, reddit-keyword-monitor, reddit-posts) include subreddits (comma-separated subreddit names, e.g. "MachineLearning,LocalLLaMA") and optionally keywords (comma-separated filter terms for reddit-keyword-monitor).' },
               x:         { type: 'number',  description: 'Grid column' },
               y:         { type: 'number',  description: 'Grid row' },
               w:         { type: 'number',  description: 'Width in grid columns' },
@@ -930,12 +908,28 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
         },
         {
           name: 'list_tiles',
-          description: 'Return the full list of tiles currently on the dashboard, including their IDs, types, positions, and config.',
+          description: 'Return the full list of tiles currently on the dashboard, including their IDs, types, positions, and config. If workspace is omitted, returns tiles grouped by all workspaces.',
           inputSchema: {
             type: 'object',
             properties: {
-              workspace: { type: 'string', description: 'Workspace name (default: dashboard-1)' },
+              workspace: { type: 'string', description: 'Workspace name. Omit to get tiles from all workspaces.' },
             },
+          },
+        },
+        {
+          name: 'list_workspaces',
+          description: 'Return all workspace names for the current user. Use this before list_tiles or add_tile to find the correct workspace name.',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'remove_dashboard',
+          description: 'Remove an entire dashboard (workspace) and all its tiles from the server.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              workspace: { type: 'string', description: 'Workspace name to remove' },
+            },
+            required: ['workspace'],
           },
         },
       ],
@@ -947,7 +941,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
     const args = (params?.['arguments'] ?? {}) as Record<string, unknown>;
 
     // Read-only tools are always permitted; write tools require auth when MCP_AUTH_REQUIRED.
-    const isWriteTool = toolName === 'add_tile' || toolName === 'remove_tile' || toolName === 'update_tile' || toolName === 'reload_env';
+    const isWriteTool = toolName === 'add_tile' || toolName === 'remove_tile' || toolName === 'update_tile' || toolName === 'reload_env' || toolName === 'remove_dashboard';
     if (isWriteTool && MCP_AUTH_REQUIRED && !jwtUser) {
       return mcpError(id, -32001, 'Unauthorized — provide a JWT via Authorization: Bearer <token>');
     }
@@ -983,30 +977,32 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
 
       // Use broadcastSseEphemeral so tile-op is NOT stored in resourceCache.
       // Caching tile-op would cause it to replay on new SSE connections, adding the same tile twice.
-      broadcastSseEphemeral('tile-op', { op: 'add', tile: newTile });
+      broadcastSseEphemeral('tile-op', { op: 'add', tile: newTile, workspace: ws });
       if (jwtUser) {
         const layout = readLayout(jwtUser.sub, ws);
-        // Seed mcpLayout from DB on first authenticated call so it reflects pre-existing tiles.
-        if (mcpLayout.length === 0) mcpLayout.push(...layout);
         layout.push(newTile);
         writeLayout(jwtUser.sub, ws, layout);
       }
-      mcpLayout.push(newTile);
       broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      // If a reddit tile was added, refresh the poller so it picks up the new subreddit.
+      if (typeof tileType === 'string' && ['reddit-posts','reddit-hot-posts','reddit-keyword-monitor'].includes(tileType)) {
+        void refreshRegistry.get('reddit-posts')?.();
+      }
       return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, tile: newTile }, null, 2) }] });
     }
 
     if (toolName === 'remove_tile') {
       const tileId = args['id'] as string | undefined;
       if (!tileId) return mcpError(id, -32602, 'remove_tile requires "id"');
-      broadcastSseEphemeral('tile-op', { op: 'remove', id: tileId });
-      mcpLayout = mcpLayout.filter((t) => t['id'] !== tileId);
+      broadcastSseEphemeral('tile-op', { op: 'remove', id: tileId, workspace: ws });
       if (jwtUser) {
         const layout = readLayout(jwtUser.sub, ws);
         const updated = layout.filter((t) => (t as Record<string, unknown>)['id'] !== tileId);
         writeLayout(jwtUser.sub, ws, updated);
       }
       broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      // If a reddit tile was removed, refresh the poller to drop its subreddits from the pool.
+      void refreshRegistry.get('reddit-posts')?.();
       return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
     }
 
@@ -1014,8 +1010,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
       const tileId = args['id'] as string | undefined;
       const patch  = args['patch'] as Record<string, unknown> | undefined;
       if (!tileId || !patch) return mcpError(id, -32602, 'update_tile requires "id" and "patch"');
-      broadcastSseEphemeral('tile-op', { op: 'update', id: tileId, patch });
-      mcpLayout = mcpLayout.map((t) => t['id'] === tileId ? { ...t, ...patch, id: t['id'] } : t);
+      broadcastSseEphemeral('tile-op', { op: 'update', id: tileId, patch, workspace: ws });
       if (jwtUser) {
         const layout = readLayout(jwtUser.sub, ws);
         const updated = layout.map((t) => {
@@ -1025,6 +1020,10 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
         writeLayout(jwtUser.sub, ws, updated);
       }
       broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      // If subreddits were changed on a reddit tile, refresh the poller with the new union.
+      if (patch && typeof patch['subreddits'] === 'string') {
+        void refreshRegistry.get('reddit-posts')?.();
+      }
       return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
     }
 
@@ -1036,6 +1035,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
         for (const [k, v] of Object.entries(vars)) {
           if (process.env[k] !== v) { process.env[k] = v; reloaded.push(k); }
         }
+        // Reddit poller is always registered at startup — no env var needed.
         console.log(`  [mcp]  reload-env  ${reloaded.length} keys: ${reloaded.join(', ') || '(none)'}`);
         return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, reloaded }) }] });
       } catch (e) {
@@ -1083,8 +1083,31 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
     }
 
     if (toolName === 'list_tiles') {
-      const tiles = jwtUser ? readLayout(jwtUser.sub, ws) : [];
-      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify(tiles, null, 2) }] });
+      if (!jwtUser) return mcpResult(id, { content: [{ type: 'text', text: '[]' }] });
+      if (args['workspace']) {
+        const tiles = readLayout(jwtUser.sub, ws);
+        return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify(tiles, null, 2) }] });
+      }
+      // No workspace specified — return tiles grouped by all workspaces
+      const allWorkspaces = listWorkspaces(jwtUser.sub);
+      const all: Record<string, unknown[]> = {};
+      for (const w of allWorkspaces) all[w] = readLayout(jwtUser.sub, w);
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify(all, null, 2) }] });
+    }
+
+    if (toolName === 'list_workspaces') {
+      const workspaces = jwtUser ? listWorkspaces(jwtUser.sub) : [];
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify(workspaces, null, 2) }] });
+    }
+
+    if (toolName === 'remove_dashboard') {
+      const targetWs = args['workspace'] as string | undefined;
+      if (!targetWs) return mcpError(id, -32602, 'remove_dashboard requires "workspace"');
+      if (!jwtUser) return mcpError(id, -32001, 'Unauthorized');
+      stmtDeleteLayout.run(jwtUser.sub, targetWs);
+      broadcastSseEphemeral('tile-op', { op: 'remove-dashboard', workspace: targetWs });
+      broadcastMcpNotification('notifications/resources/updated', { uri: 'dashboard://tiles' });
+      return mcpResult(id, { content: [{ type: 'text', text: JSON.stringify({ ok: true, removed: targetWs }) }] });
     }
 
     return mcpError(id, -32601, `Unknown tool: ${toolName}`);
@@ -1112,7 +1135,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
   if (method === 'resources/read') {
     const uri = params?.['uri'] as string | undefined;
     if (uri === 'dashboard://tiles') {
-      const tiles = jwtUser ? readLayout(jwtUser.sub, 'dashboard-1') : [];
+      const tiles = jwtUser ? readLayout(jwtUser.sub, (listWorkspaces(jwtUser.sub)[0] ?? 'dashboard-1')) : [];
       return mcpResult(id, {
         contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(tiles, null, 2) }],
       });
@@ -1144,7 +1167,7 @@ async function dispatchMcp(rpc: McpRequest, jwtUser: JwtPayload | null): Promise
   if (method === 'prompts/get') {
     const promptName = params?.['name'] as string | undefined;
     if (promptName === 'dashboard_summary') {
-      const tiles = jwtUser ? readLayout(jwtUser.sub, 'dashboard-1') : [];
+      const tiles = jwtUser ? readLayout(jwtUser.sub, (listWorkspaces(jwtUser.sub)[0] ?? 'dashboard-1')) : [];
       const rows = tiles.map((t) => {
         const tile = t as Record<string, unknown>;
         const cfg  = (tile['config'] ?? {}) as Record<string, unknown>;
@@ -1345,14 +1368,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // a user JWT, so signature verification is the sole authentication mechanism.
   // Tile data report route is also public — the tile UUID is the credential and
   // the endpoint is rate-limited; no sensitive data is exposed.
-  const isWebhookRoute = pathname.startsWith('/api/webhooks/') && method === 'POST';
+  const isWebhookRoute   = pathname.startsWith('/api/webhooks/') && method === 'POST';
   const isTileDataReport = pathname.startsWith('/api/tiles/') && pathname.endsWith('/data') && method === 'POST';
-  if (AUTH_ENABLED && !isWebhookRoute && !isTileDataReport && !extractToken(req)) {
+  const isPublicReddit   = pathname === '/api/reddit/posts' && method === 'GET';
+  if (AUTH_ENABLED && !isWebhookRoute && !isTileDataReport && !isPublicReddit && !extractToken(req)) {
     json(res, 401, { error: 'Unauthorized' });
     return;
   }
 
   // ── Per-user layouts ───────────────────────────────────────────────────────
+
+  // List all workspace names for the current user
+  if (pathname === '/api/workspaces' && method === 'GET') {
+    const jwtUser = extractToken(req);
+    if (!jwtUser) { json(res, 401, { error: 'Unauthorized' }); return; }
+    const workspaces = listWorkspaces(jwtUser.sub);
+    json(res, 200, { workspaces });
+    return;
+  }
+
   if (pathname.startsWith('/api/layout/')) {
     const workspace = decodeURIComponent(pathname.slice('/api/layout/'.length));
     const jwtUser = extractToken(req);
@@ -1370,6 +1404,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         stmtUpsertLayout.run(jwtUser.sub, workspace, JSON.stringify(tiles), Math.floor(Date.now() / 1000));
         json(res, 200, { ok: true });
       } catch (e) { json(res, 400, { error: e instanceof Error ? e.message : 'Bad request' }); }
+      return;
+    }
+    if (method === 'DELETE') {
+      stmtDeleteLayout.run(jwtUser.sub, workspace);
+      json(res, 200, { ok: true });
       return;
     }
   }
@@ -1814,7 +1853,7 @@ if ((import.meta as { main?: boolean }).main) {
       ['WooCommerce',  !!(e['WC_BASE_URL'] && e['WC_CONSUMER_KEY'] && e['WC_CONSUMER_SECRET']), 'WC_BASE_URL + WC_CONSUMER_KEY + WC_CONSUMER_SECRET'],
       ['Shopify',      !!(e['SHOPIFY_SHOP'] && e['SHOPIFY_ACCESS_TOKEN']),    'SHOPIFY_SHOP + SHOPIFY_ACCESS_TOKEN'],
       // ── Social ────────────────────────────────────────────────────────────────
-      ['Reddit',       !!(e['REDDIT_SUBREDDITS'] || e['REDDIT_KEYWORDS']),    'REDDIT_SUBREDDITS or REDDIT_KEYWORDS'],
+      ['Reddit',       true /* subreddits configurable per-tile; REDDIT_SUBREDDITS is optional fallback */,    'REDDIT_SUBREDDITS (optional)'],
       ['Product Hunt', !!(e['PRODUCTHUNT_API_TOKEN']),                         'PRODUCTHUNT_API_TOKEN'],
     ];
 

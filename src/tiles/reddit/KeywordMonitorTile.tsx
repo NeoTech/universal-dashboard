@@ -7,6 +7,7 @@ import { usePagination, PaginationBar } from '../usePagination';
 
 interface Props {
   keywords?: string;   // comma-separated, e.g. "rust,typescript,bun"
+  subreddits?: string; // comma-separated — client-side filter
   refreshInterval?: number;
 }
 
@@ -34,11 +35,16 @@ export function KeywordMonitorTile(props: Props): JSX.Element {
   const { data: store, loading, error } = useSseChannel<{ posts: RedditPost[] }>('reddit-posts', { posts: [] });
 
   const keywords = () => parseKeywords(props.keywords);
+  const subFilter = () => props.subreddits
+    ? props.subreddits.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    : [];
 
-  // When keywords are set, only show matching posts; otherwise show everything.
+  // When keywords are set, only show matching posts; additionally filter by subreddits if configured.
   const filtered = () => {
     const kw = keywords();
-    const posts = store().posts;
+    const subs = subFilter();
+    let posts = store().posts;
+    if (subs.length > 0) posts = posts.filter(p => subs.includes(p.subreddit.toLowerCase()));
     if (kw.length === 0) return posts;
     return posts.filter(p => matchedKeywords(p, kw).length > 0);
   };
@@ -48,6 +54,13 @@ export function KeywordMonitorTile(props: Props): JSX.Element {
   return (
     <BaseTile loading={loading()} error={error()} class="stripe-tile reddit-keyword-monitor-tile">
       <>
+        <Show when={props.subreddits}>
+          <p class="reddit-tile__subreddits">
+            <For each={props.subreddits!.split(',').map(s => s.trim()).filter(Boolean)}>
+              {(sub) => <span class="reddit-tile__subreddit-badge">r/{sub}</span>}
+            </For>
+          </p>
+        </Show>
         <Show when={keywords().length === 0}>
           <p class="reddit-keyword-monitor-tile__hint">
             Configure keywords in tile settings to filter posts.

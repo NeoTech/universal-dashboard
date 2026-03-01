@@ -80,6 +80,8 @@ export function TileConfigModal(props: Props): JSX.Element {
 
   // Reddit keyword monitor field
   const [keywords, setKeywords] = createSignal(props.tile.keywords ?? '');
+  // Reddit subreddits field (all reddit tile types)
+  const [subreddits, setSubreddits] = createSignal(props.tile.subreddits ?? '');
 
   // Test-connection state (shared between REST and WS sections)
   const [testStatus, setTestStatus] = createSignal<'idle' | 'loading' | 'ok' | 'error'>('idle');
@@ -202,6 +204,10 @@ export function TileConfigModal(props: Props): JSX.Element {
       updated.keywords = keywords().trim() || undefined;
     }
 
+    if (isRedditTile()) {
+      updated.subreddits = subreddits().trim() || undefined;
+    }
+
     // Sync delivery mode with the server for webhook-capable tiles.
     if (WEBHOOK_CAPABLE.has(props.tile.type)) {
       const channel = TILE_SSE_CHANNEL[props.tile.type] ?? props.tile.type;
@@ -222,6 +228,7 @@ export function TileConfigModal(props: Props): JSX.Element {
   const isCustomApi = () => props.tile.type === 'custom-api';
   const isGraphql = () => props.tile.type === 'graphql';
   const isKeywordMonitor = () => props.tile.type === 'reddit-keyword-monitor';
+  const isRedditTile = () => props.tile.type === 'reddit-keyword-monitor' || props.tile.type === 'reddit-hot-posts' || props.tile.type === 'reddit-posts';
 
   const canSave = () => {
     if (isRss())       return rssUrlValid();
@@ -321,13 +328,14 @@ export function TileConfigModal(props: Props): JSX.Element {
             </span>
           </label>
 
-          <Show when={isRest()}>
+          <Show when={isRest() || isRedditTile()}>
             <label class="field">
-              <span class="field__label">Total items to show</span>
+              <span class="field__label">Max fetched items</span>
               <input class="field__input" type="number" min="1"
                 placeholder="All available"
                 value={fetchLimit()}
                 onInput={(e) => setFetchLimit(e.currentTarget.value)} />
+              <span class="field__hint">Caps how many items are available for pagination. Leave blank for all.</span>
             </label>
           </Show>
 
@@ -634,6 +642,17 @@ export function TileConfigModal(props: Props): JSX.Element {
                 value={keywords()}
                 onInput={(e) => setKeywords(e.currentTarget.value)} />
               <span class="field__hint">Comma-separated terms to filter and highlight matching posts. Leave blank to show all posts.</span>
+            </label>
+          </Show>
+
+          <Show when={isRedditTile()}>
+            <label class="field">
+              <span class="field__label">Subreddits</span>
+              <input class="field__input" type="text"
+                placeholder="MachineLearning, LocalLLaMA, programming"
+                value={subreddits()}
+                onInput={(e) => setSubreddits(e.currentTarget.value)} />
+              <span class="field__hint">Comma-separated subreddit names (no r/ prefix). Leave blank to use the global server feed.</span>
             </label>
           </Show>
 

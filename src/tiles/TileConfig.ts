@@ -269,6 +269,13 @@ export interface TileConfig {
    */
   keywords?: string;
   /**
+   * Comma-separated subreddit names (no r/ prefix) for reddit tile types.
+   * When set, the tile fetches posts directly from these subreddits via REST
+   * instead of the global REDDIT_SUBREDDITS SSE feed.
+   * e.g. "MachineLearning,LocalLLaMA"
+   */
+  subreddits?: string;
+  /**
    * Delivery mode for supported provider tiles.
    * - 'poll'    — server polls the provider API on a schedule (default).
    * - 'webhook' — server receives push events from the provider webhook;

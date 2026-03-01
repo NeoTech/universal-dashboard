@@ -91,6 +91,16 @@ export class DashboardManager {
   }
 
   /**
+   * Add an existing dashboard by ID (e.g. discovered from the server).
+   * Does NOT switch to it. No-op if the ID already exists or at limit.
+   */
+  addExisting(id: string): void {
+    if (this._ids.includes(id) || this._ids.length >= MAX_DASHBOARDS) return;
+    this._ids.push(id);
+    this._save();
+  }
+
+  /**
    * Remove the dashboard at `index` (defaults to the active one).
    * No-op when only one dashboard remains.
    */

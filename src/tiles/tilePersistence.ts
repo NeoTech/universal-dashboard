@@ -41,10 +41,11 @@ function getAuthHeaders(): Record<string, string> {
   } catch { return {}; }
 }
 
-export async function loadLayoutFromServer(workspaceName: string, apiBase: string): Promise<TileConfig[] | null> {
+export async function loadLayoutFromServer(workspaceName: string, apiBase: string, signal?: AbortSignal): Promise<TileConfig[] | null> {
   try {
     const res = await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
       headers: getAuthHeaders(),
+      signal,
     });
     if (!res.ok) return null;
     const data = await res.json() as { tiles: TileConfig[] | null };
@@ -58,14 +59,55 @@ export async function loadLayoutFromServer(workspaceName: string, apiBase: strin
  * Save a tile layout to the server for the current authenticated user.
  * Runs fire-and-forget — layout is always saved to localStorage first.
  */
-export async function saveLayoutToServer(workspaceName: string, tiles: TileConfig[], apiBase: string): Promise<void> {
+export async function saveLayoutToServer(workspaceName: string, tiles: TileConfig[], apiBase: string, signal?: AbortSignal): Promise<void> {
   try {
-    await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
+    const res = await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ tiles }),
+      signal,
     });
+    if (!res.ok) console.warn(`[saveLayout] server returned ${res.status} for ${workspaceName}`);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') return;
+    console.warn('[saveLayout] failed:', e);
+  }
+}
+
+/**
+ * Delete a tile layout from the server (called when a dashboard is closed).
+ * localStorage must be cleared by the caller before this. Fire-and-forget.
+ */
+export async function deleteLayoutFromServer(workspaceName: string, apiBase: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${apiBase}/api/layout/${encodeURIComponent(workspaceName)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      console.warn(`[deleteLayout] server returned ${res.status} for ${workspaceName}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[deleteLayout] failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Fetch the list of workspace names known to the server for the current user.
+ * Returns an empty array on error or when unauthenticated.
+ */
+export async function loadWorkspacesFromServer(apiBase: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${apiBase}/api/workspaces`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { workspaces: string[] };
+    return data.workspaces ?? [];
   } catch {
-    // noop — localStorage is the ground truth fallback
+    return [];
   }
 }

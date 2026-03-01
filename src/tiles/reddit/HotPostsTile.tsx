@@ -5,7 +5,10 @@ import { BaseTile } from '../BaseTile';
 import type { RedditPost } from '../../data/reddit';
 import { usePagination, PaginationBar } from '../usePagination';
 
-interface Props { refreshInterval?: number; }
+interface Props {
+  subreddits?: string; // comma-separated — client-side filter, e.g. "gaming,pcgaming"
+  refreshInterval?: number;
+}
 
 function timeAgo(unixTs: number): string {
   const diff = Math.floor(Date.now() / 1000 - unixTs);
@@ -15,18 +18,35 @@ function timeAgo(unixTs: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export function HotPostsTile(_props: Props): JSX.Element {
+function parseList(raw?: string): string[] {
+  if (!raw) return [];
+  return raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+export function HotPostsTile(props: Props): JSX.Element {
   const { data: store, loading, error } = useSseChannel<{ posts: RedditPost[] }>('reddit-posts', { posts: [] });
 
-  // Sort by score descending so highest-scoring posts are always at the top.
-  const sorted = () =>
-    [...store().posts].sort((a, b) => b.score - a.score);
+  const subFilter = () => parseList(props.subreddits);
 
-  const { page, setPage, totalPages, pageItems } = usePagination(sorted, 10);
+  const filtered = () => {
+    const subs = subFilter();
+    const posts = [...store().posts];
+    const scoped = subs.length > 0 ? posts.filter(p => subs.includes(p.subreddit.toLowerCase())) : posts;
+    return scoped.sort((a, b) => b.score - a.score);
+  };
+
+  const { page, setPage, totalPages, pageItems } = usePagination(filtered, 10);
 
   return (
     <BaseTile loading={loading()} error={error()} class="stripe-tile reddit-hot-posts-tile">
       <>
+        <Show when={props.subreddits}>
+          <p class="reddit-tile__subreddits">
+            <For each={props.subreddits!.split(',').map(s => s.trim()).filter(Boolean)}>
+              {(sub) => <span class="reddit-tile__subreddit-badge">r/{sub}</span>}
+            </For>
+          </p>
+        </Show>
         <table class="tile-table">
           <thead>
             <tr>
@@ -39,7 +59,7 @@ export function HotPostsTile(_props: Props): JSX.Element {
             </tr>
           </thead>
           <tbody>
-            <Show when={sorted().length === 0}>
+            <Show when={filtered().length === 0}>
               <tr><td colspan="6" class="cell-empty">No posts</td></tr>
             </Show>
             <For each={pageItems()}>

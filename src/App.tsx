@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, Index, Show } from 'solid-js';
+import { createSignal, createEffect, onMount, onCleanup, Index, Show } from 'solid-js';
 import type { JSX } from 'solid-js';
 import type { TwmConfig } from './config/config';
 import { ThemeManager } from './config/ThemeManager';
@@ -16,8 +16,11 @@ import type { Command } from './ui/CommandPalette';
 import { HelpModal } from './ui/HelpModal';
 import { HintsProvider, useHints, HINTS_DEFAULT, HINTS_PALETTE } from './ui/HintsContext';
 import { DashboardPanel } from './panels/DashboardPanel';
+import { useSseChannel } from './ui/useSseChannel';
 import { AuthProvider, useAuth } from './ui/AuthContext';
 import { LoginModal } from './ui/LoginModal';
+import { clearTileLayout, saveTileLayout, deleteLayoutFromServer, saveLayoutToServer, loadWorkspacesFromServer } from './tiles/tilePersistence';
+import { API_BASE_URL } from './data/api';
 
 interface Props {
   config: TwmConfig;
@@ -32,6 +35,7 @@ function AppInner(props: Props): JSX.Element {
   // ── Managers ───────────────────────────────────────────────────────────────
   new ThemeManager().setTheme(props.config.theme);
   const wm = new WorkspaceManager();
+  const auth = useAuth();
 
   // ── State ──────────────────────────────────────────────────────────────────
   const restoredTree = wm.activeTree() ?? makeLeaf();
@@ -65,6 +69,21 @@ function AppInner(props: Props): JSX.Element {
   const nextDash = () => { dm.next(); setActiveDashIdx(dm.activeIndex); };
   const prevDash = () => { dm.prev(); setActiveDashIdx(dm.activeIndex); };
 
+  // ── SSE: handle MCP remove-dashboard ops ────────────────────────────────
+  type DashOp = { op: string; workspace?: string } | null;
+  const { data: dashOp } = useSseChannel<DashOp>('tile-op', null);
+  createEffect(() => {
+    const op = dashOp();
+    if (!op || op.op !== 'remove-dashboard' || !op.workspace) return;
+    const ws = op.workspace;
+    const idx = dm.ids.indexOf(ws);
+    if (idx === -1) return; // not in our list
+    clearTileLayout(ws);
+    dm.remove(idx);
+    setDashIds(dm.ids);
+    setActiveDashIdx(dm.activeIndex);
+  });
+
   // ── Commands ───────────────────────────────────────────────────────────────
   const commands: Command[] = [
     {
@@ -72,7 +91,15 @@ function AppInner(props: Props): JSX.Element {
       label: 'New Dashboard',
       run: () => {
         if (!dm.canAdd) return;
-        dm.add();
+        const newId = dm.add();
+        if (newId) {
+          // Pre-populate localStorage so DashboardPanel.onMount finds data and
+          // skips the "no local data" path (which would flash default tiles then
+          // overwrite them). Save an empty array — the panel's defaultTiles()
+          // will generate the correct initial layout and persist it.
+          saveTileLayout(newId, []);
+          void saveLayoutToServer(newId, [], API_BASE_URL);
+        }
         setDashIds(dm.ids);
         setActiveDashIdx(dm.activeIndex);
       },
@@ -80,8 +107,26 @@ function AppInner(props: Props): JSX.Element {
     {
       id: 'close-dashboard',
       label: 'Close Dashboard',
-      run: () => {
+      run: async () => {
         if (!dm.canRemove) return;
+        const removedId = dm.activeDashboardId;
+        // 1. Clear localStorage immediately (sync)
+        clearTileLayout(removedId);
+
+        // 2. Delete from server with one retry
+        let deleted = await deleteLayoutFromServer(removedId, API_BASE_URL);
+        if (!deleted) deleted = await deleteLayoutFromServer(removedId, API_BASE_URL);
+        if (!deleted) {
+          // Queue for cleanup on next load
+          try {
+            const raw = localStorage.getItem('twm:pending-deletes');
+            const pending: string[] = raw ? JSON.parse(raw) : [];
+            if (!pending.includes(removedId)) pending.push(removedId);
+            localStorage.setItem('twm:pending-deletes', JSON.stringify(pending));
+          } catch { /* noop */ }
+        }
+
+        // 3. Update local registry and signals
         dm.remove();
         setDashIds(dm.ids);
         setActiveDashIdx(dm.activeIndex);
@@ -118,6 +163,33 @@ function AppInner(props: Props): JSX.Element {
 
   onMount(() => {
     setHints(HINTS_DEFAULT);
+
+    // ── Reconcile dashboard list with server ──────────────────────────────
+    // Process any deletes that failed on a previous session
+    if (auth.isAuthenticated()) {
+      try {
+        const raw = localStorage.getItem('twm:pending-deletes');
+        if (raw) {
+          const pending: string[] = JSON.parse(raw);
+          localStorage.removeItem('twm:pending-deletes');
+          for (const ws of pending) {
+            void deleteLayoutFromServer(ws, API_BASE_URL);
+          }
+        }
+      } catch { /* noop */ }
+
+      // Discover server-only dashboards (e.g. created by MCP while offline)
+      void loadWorkspacesFromServer(API_BASE_URL).then((serverWs) => {
+        if (!serverWs.length) return;
+        const localIds = new Set(dm.ids);
+        const newIds = serverWs.filter((ws) => !localIds.has(ws));
+        if (newIds.length === 0) return;
+        // Add server-only dashboards to the local registry
+        for (const ws of newIds) dm.addExisting(ws);
+        setDashIds(dm.ids);
+      });
+    }
+
     const handler = (e: KeyboardEvent) => {
       // Don't fire modifier-free shortcuts (like '?') when typing in an input
       const target = e.target as HTMLElement;

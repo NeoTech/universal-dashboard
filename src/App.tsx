@@ -106,10 +106,8 @@ function AppInner(props: Props): JSX.Element {
         if (!dm.canAdd) return;
         dm.add();
         // Do NOT pre-seed localStorage here. DashboardPanel.onMount will read
-        // null from localStorage and null from the server, correctly fall into
-        // the "neither has data" branch, generate defaultTiles(), and persist
-        // them to both stores. Pre-seeding [] would make the panel think the
-        // dashboard was intentionally cleared and show nothing instead.
+        // null from localStorage and null from the server, then persist the
+        // default state for a brand-new dashboard.
         setDashIds(dm.ids);
         setActiveDashIdx(dm.activeIndex);
       },

@@ -5,7 +5,6 @@ import { AddTileModal } from '../tiles/AddTileModal';
 import { TileConfigModal } from '../tiles/TileConfigModal';
 import { EnvConfigModal } from '../tiles/EnvConfigModal';
 import { renderTile } from '../tiles/renderTile';
-import { makeTile } from '../tiles/TileConfig';
 import type { TileConfig, TileType } from '../tiles/TileConfig';
 import { TILE_SSE_CHANNEL, WEBHOOK_CAPABLE, WS_MANAGED_TILES } from '../tiles/TileConfig';
 import { saveTileLayout, loadTileLayout, loadLayoutFromServer, saveLayoutToServer } from '../tiles/tilePersistence';
@@ -89,22 +88,8 @@ interface Props {
   workspaceName?: string;
 }
 
-const TOOLBAR_H = 37; // dashboard toolbar height + border
-const STATUS_H = 25;  // status bar height + border
-
 function defaultTiles(): TileConfig[] {
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-  const vh = typeof window !== 'undefined' ? window.innerHeight - STATUS_H - TOOLBAR_H : 658;
-  // Split canvas into 4 equal quadrants with 8px gutters
-  const gap = 8;
-  const hw = Math.floor((vw / 2 - gap * 1.5) / 16) * 16; // half-width snapped
-  const hh = Math.floor((vh / 2 - gap * 1.5) / 16) * 16;  // half-height snapped
-  return [
-    makeTile('stripe-payments',  { x: gap, y: gap, w: hw, h: hh }),
-    makeTile('stripe-orders',    { x: gap * 2 + hw, y: gap, w: hw, h: hh }),
-    makeTile('stripe-revenue',   { x: gap, y: gap * 2 + hh, w: hw, h: hh }),
-    makeTile('stripe-customers', { x: gap * 2 + hw, y: gap * 2 + hh, w: hw, h: hh }),
-  ];
+  return [];
 }
 
 /**

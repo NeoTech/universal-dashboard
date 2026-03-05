@@ -10,7 +10,6 @@ COPY e2e/ ./e2e/
 COPY public/ ./public/
 COPY api/ ./api/
 COPY docker/ ./docker/
-COPY docker2/ ./docker2/
 COPY index.html ./
 COPY tsconfig.json ./
 COPY vite.config.ts ./
@@ -23,7 +22,7 @@ RUN bun run build
 # Compile backend, frontend static server and supervisor to linux binaries
 RUN bun build ./api/server.ts --compile --target=bun-linux-x64 --outfile /tmp/server
 RUN bun build ./docker/static-server.ts --compile --target=bun-linux-x64 --outfile /tmp/frontend
-RUN bun build ./docker2/supervisor.ts --compile --target=bun-linux-x64 --outfile /tmp/supervisor
+RUN bun build ./docker/supervisor.ts --compile --target=bun-linux-x64 --outfile /tmp/supervisor
 
 FROM traefik:v3 AS traefik-bin
 FROM ngrok/ngrok:latest AS ngrok-bin

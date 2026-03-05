@@ -14,8 +14,14 @@ import { createContext, useContext, createSignal, onMount } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { API_BASE_URL } from '../data/api';
 
+/**
+ * Authenticated user record returned by `/api/auth/me` and embedded in the
+ * JWT payload. Stored in `localStorage` under `twm-user` alongside the token.
+ */
 export interface AuthUser {
+  /** Numeric primary key from the `users` table. */
   id: number;
+  /** Display name / login handle (case-insensitive on the server). */
   username: string;
 }
 
@@ -41,6 +47,23 @@ function readLocal<T>(key: string): T | null {
   try { const v = localStorage.getItem(key); return v ? (JSON.parse(v) as T) : null; } catch { return null; }
 }
 
+/**
+ * SolidJS context provider that manages JWT-based authentication state for
+ * the entire application.
+ *
+ * Responsibilities:
+ * - Reads any existing token from `localStorage` (`twm-jwt`) on mount.
+ * - Calls `/api/auth/config` once to discover whether auth is required and
+ *   which provider (`local` | `saml`) is active; sets `authReady` when done.
+ * - Patches `window.fetch` to automatically inject `Authorization: Bearer
+ *   <token>` on all `/api/` requests so tile fetches need no per-call changes.
+ * - Consumes a `?token=` query-string parameter written by the SAML callback
+ *   redirect and exchanges it for user info via `/api/auth/me`.
+ *
+ * Wrap the application root with this provider before using {@link useAuth}.
+ *
+ * @param props.children - The application subtree that may call `useAuth()`.
+ */
 export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const [token, setToken]           = createSignal<string | null>(localStorage.getItem(TOKEN_KEY));
   const [user,  setUser]            = createSignal<AuthUser | null>(readLocal<AuthUser>(USER_KEY));
@@ -84,6 +107,27 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       })
       .catch(() => { /* server not reachable yet — proceed unauthenticated */ })
       .finally(() => { setAuthReady(true); });
+
+    // Validate any persisted token so stale/invalid JWTs don't cause endless
+    // unauthorized SSE reconnect loops. If invalid, clear auth state and let
+    // the login modal appear normally.
+    const persistedToken = token();
+    if (persistedToken) {
+      void fetch(`${API_BASE_URL}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${persistedToken}` },
+      })
+        .then(async (r) => {
+          if (r.ok) {
+            const u = await r.json() as AuthUser;
+            if (u.id && u.username) setUser(u);
+            return;
+          }
+          if (r.status === 401 || r.status === 403) {
+            logout();
+          }
+        })
+        .catch(() => { /* network issue: keep token; don't force logout */ });
+    }
 
     // Consume ?token= from the URL (issued after SAML callback redirect).
     const qs = new URLSearchParams(window.location.search);
@@ -133,6 +177,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   return <AuthContext.Provider value={ctx}>{props.children}</AuthContext.Provider>;
 }
 
+/**
+ * Consume the authentication context provided by {@link AuthProvider}.
+ *
+ * Returns the full {@link AuthCtxValue} including reactive signals for token,
+ * user, auth state, provider type, and SAML login URL, plus imperative
+ * `login` / `logout` helpers.
+ *
+ * @throws Error if called outside of an `<AuthProvider>` subtree.
+ * @returns The current authentication context value.
+ */
 export function useAuth(): AuthCtxValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');

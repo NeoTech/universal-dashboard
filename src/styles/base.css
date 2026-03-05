@@ -1076,7 +1076,7 @@ body {
 .tile-toolbar__count { font-size: var(--twm-font-size-xs); color: var(--twm-color-text-dim); }
 
 /* cell helpers */
-.cell-truncate { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-truncate { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cell-empty { text-align: center; color: var(--twm-color-muted, #888); padding: 16px 0; font-size: 0.85rem; }
 
 /* Refund / price forms */
@@ -1155,15 +1155,6 @@ body {
 
 /* Muted helper text inside tiles */
 .tile-muted { color: var(--twm-color-text-dim); font-size: var(--twm-font-size-xs); margin: 8px 0; }
-
-/* Coming-soon placeholder tile */
-.tile-coming-soon {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  height: 100%; gap: 6px; padding: 24px; text-align: center;
-}
-.tile-coming-soon__icon  { font-size: 2rem; margin: 0; line-height: 1; }
-.tile-coming-soon__title { font-size: .9rem; font-weight: 600; margin: 0; }
-.tile-coming-soon__note  { font-size: var(--twm-font-size-xs); color: var(--twm-color-text-dim); margin: 0; }
 
 /* Drawer deployment rows (Cloudflare Pages) */
 .drawer-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--twm-color-border); }
@@ -1648,3 +1639,262 @@ fieldset.field legend {
   font-size: var(--twm-font-size-sm);
   cursor: pointer;
 }
+
+/* ── Shared table / cell utilities ──────────────────────────────────────────── */
+.cell-right { text-align: right; }
+.cell-muted { color: var(--twm-color-text-dim); font-size: var(--twm-font-size-xs); }
+.tile-table .tr--muted td { opacity: .5; }
+.tile-table .tr--muted:hover td { opacity: .7; }
+
+/* Search input inside tile toolbar */
+.tile-search {
+  padding: 3px 8px;
+  background: var(--twm-color-surface2);
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius);
+  color: var(--twm-color-text);
+  font-size: var(--twm-font-size-sm);
+  width: 180px;
+  outline: none;
+}
+.tile-search:focus { border-color: var(--twm-color-accent); }
+
+/* Drawer helpers */
+.drawer-loading { font-size: .82rem; color: var(--twm-color-text-dim); padding: 16px 0; text-align: center; }
+.drawer-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+
+/* ── FLINT tile CSS ──────────────────────────────────────────────────────────── */
+
+/* Auth tile */
+.flint-auth-tile { display: flex; flex-direction: column; height: 100%; }
+.flint-auth-form {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 16px 12px;
+  max-width: 320px; margin: 0 auto;
+}
+.flint-auth-form__title { font-size: .9rem; font-weight: 600; margin: 0 0 4px; }
+.flint-auth-form__label { display: flex; flex-direction: column; gap: 3px; font-size: var(--twm-font-size-sm); font-weight: 500; }
+.flint-auth-form__input {
+  padding: 5px 8px;
+  background: var(--twm-color-surface2);
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius);
+  color: var(--twm-color-text);
+  font-size: var(--twm-font-size-sm);
+}
+.flint-auth-form__input:focus { outline: none; border-color: var(--twm-color-accent); }
+.flint-auth-form__error { font-size: var(--twm-font-size-xs); color: var(--twm-color-danger, #e05252); margin: 0; }
+.flint-auth-session {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px;
+}
+.flint-auth-session__icon { font-size: 1.4rem; color: var(--twm-color-success, #4caf50); }
+.flint-auth-session__info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.flint-auth-session__email { font-size: var(--twm-font-size-sm); color: var(--twm-color-text-dim); }
+.flint-auth-session__expiry { font-size: var(--twm-font-size-xs); color: var(--twm-color-text-dim); }
+
+/* Overview KPI grid */
+.flint-kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; }
+.flint-kpi-card {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px;
+  background: var(--twm-color-surface2);
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius);
+}
+.flint-kpi-card__label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--twm-color-text-dim); }
+.flint-kpi-card__value { font-size: 1.4rem; font-weight: 700; line-height: 1.2; }
+.flint-kpi-card__sub { font-size: var(--twm-font-size-xs); color: var(--twm-color-text-dim); }
+
+/* Clickable KPI chip (Low Stock button) */
+.flint-kpi-chip {
+  all: unset; cursor: pointer; padding: 0;
+  font-size: 1.4rem; font-weight: 700; line-height: 1.2;
+}
+.flint-kpi-chip--warn { color: var(--twm-color-warning, #f09300); }
+.flint-kpi-chip:hover { text-decoration: underline; }
+
+/* Order status filter chips */
+.flint-filter-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.flint-filter-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--twm-color-border);
+  border-radius: 10px;
+  font-size: var(--twm-font-size-xs);
+  cursor: pointer;
+  background: transparent;
+  color: var(--twm-color-text-dim);
+  transition: background .1s, color .1s;
+}
+.flint-filter-chip:hover { background: var(--twm-color-surface2); color: var(--twm-color-text); }
+.flint-filter-chip--active {
+  background: var(--twm-color-accent);
+  color: #fff;
+  border-color: var(--twm-color-accent);
+}
+
+/* Inline forms inside drawer (shipment, refund) */
+.flint-inline-form {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  margin: 8px 0;
+  background: var(--twm-color-surface2);
+  border: 1px solid var(--twm-color-border);
+  border-radius: var(--twm-radius);
+}
+
+/* Order status badge colors */
+.flint-status--pending    { background: color-mix(in srgb, var(--twm-color-warning, #f09300) 15%, transparent);  color: var(--twm-color-warning,  #f09300); }
+.flint-status--confirmed  { background: color-mix(in srgb, var(--twm-color-accent)           15%, transparent);  color: var(--twm-color-accent); }
+.flint-status--processing { background: color-mix(in srgb, var(--twm-color-info, #4dabf7)    15%, transparent);  color: var(--twm-color-info,    #4dabf7); }
+.flint-status--shipped    { background: color-mix(in srgb, var(--twm-color-info, #4dabf7)    15%, transparent);  color: var(--twm-color-info,    #4dabf7); }
+.flint-status--delivered  { background: color-mix(in srgb, var(--twm-color-success, #4caf50) 15%, transparent);  color: var(--twm-color-success, #4caf50); }
+.flint-status--cancelled  { background: color-mix(in srgb, var(--twm-color-danger, #e05252)  15%, transparent);  color: var(--twm-color-danger,  #e05252); }
+.flint-status--refunded   { background: color-mix(in srgb, var(--twm-color-danger, #e05252)  15%, transparent);  color: var(--twm-color-danger,  #e05252); }
+
+/* Stock level helpers */
+.flint-stock--ok   { color: var(--twm-color-success, #4caf50); }
+.flint-stock--low  { color: var(--twm-color-warning, #f09300); font-weight: 600; }
+.flint-stock--zero { color: var(--twm-color-danger,  #e05252); font-weight: 700; }
+
+/* Category tree (TWM-149) */
+.flint-category-tree { padding: 8px; overflow-y: auto; }
+.flint-category-tree__node { margin-bottom: 2px; }
+.flint-category-tree__row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.flint-category-tree__name { flex: 1; font-size: var(--twm-font-size-sm); cursor: default; }
+
+/* Product create overlay (TWM-149) */
+.flint-create-overlay { position: absolute; inset: 0; background: var(--twm-color-surface); z-index: 10; padding: 12px; overflow-y: auto; }
+
+/* Sparkline clickable area (TWM-149) */
+.flint-sparkline-area { border-radius: var(--twm-radius); transition: background .1s; }
+.flint-sparkline-area:hover { background: var(--twm-color-surface2); }
+
+/* ── FLINT TWM-150 tiles ──────────────────────────────────────────────────── */
+
+/* Generic status badge (used by shipments, webhooks) */
+.flint-status-badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: var(--twm-font-size-xs); font-weight: 600; }
+
+/* Order number chip — clickable shorthand */
+.flint-order-chip { display: inline-block; padding: 1px 5px; border-radius: 4px; background: var(--twm-color-surface2); border: 1px solid var(--twm-color-border); font-size: var(--twm-font-size-xs); cursor: pointer; }
+.flint-order-chip:hover { background: var(--twm-color-accent); color: #fff; }
+
+/* Tracking number — copy-on-click */
+.flint-tracking-copy { cursor: pointer; font-family: monospace; font-size: var(--twm-font-size-xs); }
+.flint-tracking-copy:hover { text-decoration: underline; }
+
+/* Shipment detail drawer list */
+.flint-shipment-detail p { margin: 4px 0; font-size: var(--twm-font-size-sm); }
+.flint-tracking-events { margin: 4px 0; padding-left: 16px; font-size: var(--twm-font-size-xs); }
+.flint-tracking-events li { margin: 2px 0; }
+
+/* Data health traffic-light dots */
+.flint-health-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.flint-dot--green  { background: var(--twm-color-success, #4caf50); }
+.flint-dot--yellow { background: var(--twm-color-warning, #f09300); }
+.flint-dot--red    { background: var(--twm-color-danger,  #e05252); }
+
+/* WS connection indicator */
+.flint-ws-indicator {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--twm-font-size-xs); color: var(--twm-color-text-muted);
+  user-select: none;
+}
+.flint-ws-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--twm-color-text-muted);
+  transition: background .2s;
+}
+.flint-ws-dot--connected .flint-ws-dot    { background: var(--twm-color-success, #4caf50); }
+.flint-ws-dot--connecting .flint-ws-dot   { background: var(--twm-color-warning, #f09300); animation: flint-pulse 1s ease-in-out infinite; }
+.flint-ws-dot--disconnected .flint-ws-dot { background: var(--twm-color-text-muted); }
+.flint-ws-label { font-size: 10px; letter-spacing: .5px; }
+@keyframes flint-pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* Stripe sync in-progress */
+.flint-sync-progress { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
+.flint-sync-result   { margin-top: 8px; padding: 8px; background: var(--twm-color-surface2); border-radius: var(--twm-radius); }
+
+/* Webhook monitor event log */
+.flint-webhook-type-badge { display: inline-block; padding: 1px 5px; border-radius: 4px; font-size: var(--twm-font-size-xs); background: var(--twm-color-surface2); font-family: monospace; }
+.flint-webhook-json { margin: 0; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+/* Order search result card */
+.flint-search-result-card { padding: 10px; background: var(--twm-color-surface2); border-radius: var(--twm-radius); border: 1px solid var(--twm-color-border); font-size: var(--twm-font-size-sm); }
+.flint-search-result-card strong { font-size: var(--twm-font-size-base); }
+
+/* Clickable link style for inline names */
+.flint-link { color: var(--twm-color-accent); cursor: pointer; text-decoration: none; }
+.flint-link:hover { text-decoration: underline; }
+
+/* Expandable row detail section */
+.flint-expand-row td { padding: 0 !important; }
+.flint-expand-content { padding: 8px 12px 10px; background: var(--twm-color-surface2); border-top: 1px solid var(--twm-color-border); }
+.flint-expand-content .tile-table { font-size: var(--twm-font-size-xs); }
+
+/* Batch operations toolbar */
+.flint-batch-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; margin-bottom: 4px;
+  background: color-mix(in srgb, var(--twm-color-accent) 10%, var(--twm-color-surface2));
+  border: 1px solid var(--twm-color-accent);
+  border-radius: var(--twm-radius);
+  font-size: var(--twm-font-size-sm);
+}
+
+/* Small inline action button in table rows */
+.flint-inline-action {
+  padding: 2px 8px;
+  border: 1px solid var(--twm-color-accent);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--twm-color-accent);
+  font-size: var(--twm-font-size-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .1s, color .1s;
+}
+.flint-inline-action:hover:not(:disabled) { background: var(--twm-color-accent); color: #fff; }
+.flint-inline-action:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Inline editable cell (click to edit) */
+.flint-editable-cell { cursor: text; border-bottom: 1px dashed var(--twm-color-border); }
+.flint-inline-input {
+  width: 60px; padding: 1px 4px;
+  border: 1px solid var(--twm-color-accent);
+  border-radius: 3px;
+  background: var(--twm-color-surface);
+  color: var(--twm-color-text);
+  font-size: var(--twm-font-size-xs);
+  text-align: center;
+}
+
+/* Flint density: data-density attribute on tile root */
+[data-density="compact"] .tile-toolbar { padding: 4px 6px; gap: 4px; flex-wrap: wrap; }
+[data-density="compact"] .tile-table th,
+[data-density="compact"] .tile-table td { padding: 3px 6px; font-size: var(--twm-font-size-xs); }
+[data-density="compact"] .flint-kpi-grid { gap: 6px; }
+[data-density="compact"] .flint-kpi-card__value { font-size: var(--twm-font-size-lg); }
+[data-density="compact"] .flint-kpi-card__sub { display: none; }
+[data-density="compact"] .flint-filter-chips { gap: 3px; }
+[data-density="compact"] .flint-filter-chip { padding: 2px 6px; font-size: 10px; }
+[data-density="compact"] .cell-truncate { max-width: 100px; }
+
+[data-density="expanded"] .flint-kpi-grid { gap: 16px; }
+[data-density="expanded"] .flint-kpi-card { padding: 14px; }
+[data-density="expanded"] .flint-kpi-card__value { font-size: var(--twm-font-size-2xl, 1.75rem); }
+
+/* Sticky table headers for all tiles */
+.stripe-tile .tile-table thead th,
+.stripe-tile .stripe-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--twm-color-surface);
+}
+
+/* Column hiding at compact density */
+[data-density="compact"] .flint-orders-tile .col-date,
+[data-density="compact"] .flint-orders-tile .col-customer { display: none; }
+[data-density="compact"] .flint-products-tile .col-price { display: none; }
+[data-density="compact"] .flint-customers-tile .col-email { display: none; }

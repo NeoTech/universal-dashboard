@@ -7,27 +7,38 @@ import { EnvConfigModal } from '../tiles/EnvConfigModal';
 import { renderTile } from '../tiles/renderTile';
 import { makeTile } from '../tiles/TileConfig';
 import type { TileConfig, TileType } from '../tiles/TileConfig';
-import { TILE_SSE_CHANNEL, WEBHOOK_CAPABLE } from '../tiles/TileConfig';
+import { TILE_SSE_CHANNEL, WEBHOOK_CAPABLE, WS_MANAGED_TILES } from '../tiles/TileConfig';
 import { saveTileLayout, loadTileLayout, loadLayoutFromServer, saveLayoutToServer } from '../tiles/tilePersistence';
 import { useSseChannel } from '../ui/useSseChannel';
 import { API_BASE_URL } from '../data/api';
 import { useAuth } from '../ui/AuthContext';
+import { DashboardActionsProvider } from '../tiles/DashboardActionsContext';
 
 
 /** Tile types that self-poll and don't have a server-side SSE channel. */
 const SELF_POLLING_TYPES = new Set<TileType>(['rss-feed', 'rest', 'websocket']);
+const FLINT_CHANNEL_PREFIX = 'flint-';
+
+function isFlintChannel(channel: string): boolean {
+  return channel.startsWith(FLINT_CHANNEL_PREFIX);
+}
 
 /**
  * Merge all tiles that share the same SSE channel into one effective setting.
  * Rule: if ANY tile on a channel wants polling active (ms > 0), the channel
  * stays active at the minimum non-zero interval across those tiles. A channel
  * is only paused when EVERY tile sharing it has refreshInterval === 0.
+ *
+ * @param tileset - Current set of tile configurations for this dashboard.
+ * @returns Map of SSE channel name to resolved poll interval in milliseconds.
  */
 function resolveChannelSettings(tileset: TileConfig[]): Map<string, number> {
   const resolved = new Map<string, number>();
   for (const t of tileset) {
     if (SELF_POLLING_TYPES.has(t.type) || t.refreshInterval === undefined) continue;
+    if (WS_MANAGED_TILES.has(t.type)) continue;
     const ch = TILE_SSE_CHANNEL[t.type] ?? t.type;
+    if (isFlintChannel(ch)) continue;
     const ms = t.refreshInterval;
     const current = resolved.get(ch);
     if (current === undefined) {
@@ -43,6 +54,15 @@ function resolveChannelSettings(tileset: TileConfig[]): Map<string, number> {
   return resolved;
 }
 
+/**
+ * POST the resolved poll interval for a single SSE channel to the API server.
+ *
+ * Sends `POST /api/poll/pause/:channel` when `ms === 0`, otherwise sends
+ * `POST /api/poll/resume/:channel` and `POST /api/poll/set-interval/:channel`.
+ *
+ * @param channel - SSE channel name (e.g. `"stripe-payments"`).
+ * @param ms - Desired poll interval in milliseconds; `0` means pause.
+ */
 function syncChannelToServer(channel: string, ms: number): void {
   if (ms === 0) {
     void fetch(`${API_BASE_URL}/api/poll/pause/${channel}`, { method: 'POST' });
@@ -56,8 +76,16 @@ function syncChannelToServer(channel: string, ms: number): void {
   }
 }
 
+/**
+ * Props accepted by {@link DashboardPanel}.
+ */
 interface Props {
+  /** Unique identifier for this panel; used as the localStorage persistence key. */
   panelId: string;
+  /**
+   * Name of the logical workspace / dashboard slot.
+   * Defaults to `"default"` when omitted.
+   */
   workspaceName?: string;
 }
 
@@ -79,6 +107,32 @@ function defaultTiles(): TileConfig[] {
   ];
 }
 
+/**
+ * Interactive dashboard panel that hosts a free-form tile grid.
+ *
+ * **Lifecycle (onMount)**
+ * 1. Loads tile layout from localStorage immediately for a instant first render.
+ * 2. If authenticated, fetches the server-side layout and reconciles:
+ *    - Both local and server data present: merge server-only tiles into local.
+ *    - Server only: server wins (fresh browser / cleared storage).
+ *    - Local only: push to server to keep the mirror in sync.
+ *    - Neither: generate `defaultTiles()` and persist to both stores.
+ * 3. Syncs all SSE channel poll intervals and webhook delivery modes to the
+ *    API server based on the loaded tile configuration.
+ *
+ * **SSE tile-op effect** — a `createEffect` subscribes to the `tile-op` SSE
+ * channel. Incoming `add` / `remove` / `update` operations are applied to the
+ * tile signal and reflected in localStorage. `untrack(tiles)` is used when
+ * reading the current tile list inside the effect to prevent the effect from
+ * re-running on every tile mutation (which would replay the last MCP op).
+ *
+ * **AbortController cancellation** — an `AbortController` is created on mount
+ * and aborted in `onCleanup`. All async fetch calls pass `signal` and catch
+ * rejections with `swallowAbort`, which re-throws anything other than
+ * `AbortError` so genuine network errors still surface.
+ *
+ * @param props - Panel ID and optional workspace name.
+ */
 export function DashboardPanel(props: Props): JSX.Element {
   const workspaceName = () => props.workspaceName ?? 'default';
   const auth = useAuth();
@@ -97,6 +151,15 @@ export function DashboardPanel(props: Props): JSX.Element {
   const abortController = new AbortController();
   let disposed = false;
   onCleanup(() => { disposed = true; abortController.abort(); });
+
+  /**
+   * Silently swallow AbortError rejections (expected when component unmounts).
+   * Any other error is re-thrown so it surfaces as an unhandled rejection.
+   * @param e - The caught rejection value.
+   */
+  const swallowAbort = (e: unknown): void => {
+    if ((e as { name?: string })?.name !== 'AbortError') throw e as Error;
+  };
 
   // ── MCP / SSE-driven layout changes ─────────────────────────────────────
   // tile-op: targeted add / remove / update broadcast by MCP tools
@@ -137,7 +200,11 @@ export function DashboardPanel(props: Props): JSX.Element {
     return id ? tiles().find((t) => t.id === id) ?? null : null;
   };
 
-  /** Save to localStorage + server, deduplicated by channel for poll sync. */
+  /**
+   * Persist a tile layout to localStorage and, when authenticated, to the
+   * server. Call this after every mutation (add, remove, configure, move).
+   * @param updated - The full updated tile array to persist.
+   */
   function persistLayout(updated: TileConfig[]): void {
     saveTileLayout(workspaceName(), updated);
     if (auth.isAuthenticated()) {
@@ -159,8 +226,10 @@ export function DashboardPanel(props: Props): JSX.Element {
     if (auth.isAuthenticated()) {
       void loadLayoutFromServer(workspaceName(), API_BASE_URL, signal).then((serverTiles) => {
         if (disposed) return;
-        const hasLocal = local !== null && local.length > 0;
-        const hasServer = serverTiles !== null && serverTiles.length > 0;
+        // Distinguish null (no data at all) from [] (user deliberately emptied).
+        // An empty array IS a valid saved state — don't fall back to defaultTiles().
+        const hasLocal = local !== null;
+        const hasServer = serverTiles !== null;
 
         if (hasServer && hasLocal) {
           // Merge: keep local as base, add any server-side tiles not in local
@@ -171,10 +240,10 @@ export function DashboardPanel(props: Props): JSX.Element {
             const merged = [...local!, ...serverOnly];
             setTiles(merged);
             saveTileLayout(workspaceName(), merged);
-            void saveLayoutToServer(workspaceName(), merged, API_BASE_URL, signal);
+            void saveLayoutToServer(workspaceName(), merged, API_BASE_URL, signal).catch(swallowAbort);
           } else {
             // Local is up-to-date — push to server to keep mirror in sync
-            void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal);
+            void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal).catch(swallowAbort);
           }
         } else if (hasServer && !hasLocal) {
           // No local data — server wins (e.g. fresh browser / cleared storage)
@@ -182,15 +251,15 @@ export function DashboardPanel(props: Props): JSX.Element {
           saveTileLayout(workspaceName(), serverTiles!);
         } else if (hasLocal) {
           // Only local data — push to server
-          void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal);
+          void saveLayoutToServer(workspaceName(), local!, API_BASE_URL, signal).catch(swallowAbort);
         } else {
           // Neither has data — persist defaults to both stores
           const defaults = defaultTiles();
           setTiles(defaults);
           saveTileLayout(workspaceName(), defaults);
-          void saveLayoutToServer(workspaceName(), defaults, API_BASE_URL, signal);
+          void saveLayoutToServer(workspaceName(), defaults, API_BASE_URL, signal).catch(swallowAbort);
         }
-      });
+      }).catch(swallowAbort);
     }
 
     // Sync tile poll settings to the API server.
@@ -225,11 +294,23 @@ export function DashboardPanel(props: Props): JSX.Element {
     }
   });
 
+  /**
+   * Handle a tile layout change from the TileGrid (drag / resize).
+   *
+   * @param updated - Full updated tile array after the layout change.
+   */
   function handleLayoutChange(updated: TileConfig[]): void {
     setTiles(updated);
     persistLayout(updated);
   }
 
+  /**
+   * Add a newly created tile from the AddTileModal.
+   * If the modal was invoked from a double-click, the tile is placed at that
+   * canvas position; otherwise it uses the tile's default coordinates.
+   *
+   * @param tile - The new tile configuration to add.
+   */
   function handleAddTile(tile: TileConfig): void {
     const pos = addAtPosition();
     const placed = pos ? { ...tile, x: pos.x, y: pos.y } : tile;
@@ -239,12 +320,26 @@ export function DashboardPanel(props: Props): JSX.Element {
     persistLayout(updated);
   }
 
+  /**
+   * Remove the tile with the given ID from the dashboard.
+   *
+   * @param id - Unique tile ID to remove.
+   */
   function handleRemoveTile(id: string): void {
     const updated = tiles().filter((t) => t.id !== id);
     setTiles(updated);
     persistLayout(updated);
   }
 
+  /**
+   * Persist updated tile configuration after the TileConfigModal is saved.
+   *
+   * Recomputes the effective SSE channel poll interval using
+   * {@link resolveChannelSettings} so one tile's pause setting does not
+   * silence a channel another tile still wants active.
+   *
+   * @param updated - The updated tile configuration.
+   */
   function handleSaveTileConfig(updated: TileConfig): void {
     // Capture previous state before update for pause/resume comparison.
     const prev = tiles().find((t) => t.id === updated.id);
@@ -257,8 +352,9 @@ export function DashboardPanel(props: Props): JSX.Element {
     // Recompute the effective channel setting across all tiles sharing this channel,
     // then sync only that channel to the server. This avoids one tile's pause
     // silencing a channel another tile still wants active.
-    if (prev && !SELF_POLLING_TYPES.has(updated.type)) {
+    if (prev && !SELF_POLLING_TYPES.has(updated.type) && !WS_MANAGED_TILES.has(updated.type)) {
       const channel = TILE_SSE_CHANNEL[updated.type] ?? updated.type;
+      if (isFlintChannel(channel)) return;
       const resolved = resolveChannelSettings(newTiles);
       // Only send if this channel has an explicit setting.
       const effectiveMs = resolved.get(channel);
@@ -268,6 +364,14 @@ export function DashboardPanel(props: Props): JSX.Element {
     }
   }
 
+  /**
+   * Trigger an immediate server-side refresh for a specific tile's SSE channel.
+   *
+   * Self-polling tile types (`rss-feed`, `rest`, `websocket`) handle their own
+   * refresh via TileRefreshContext and are skipped here.
+   *
+   * @param tileId - ID of the tile to refresh.
+   */
   function handleRefreshTile(tileId: string): void {
     const tile = tiles().find((t) => t.id === tileId);
     if (!tile) return;
@@ -285,6 +389,16 @@ export function DashboardPanel(props: Props): JSX.Element {
       });
   }
 
+  /**
+   * Duplicate a tile to a new canvas position.
+   *
+   * Uses `structuredClone` to deep-copy nested config objects (`ws`, `rest`,
+   * etc.) so the copy and original do not share mutable references.
+   *
+   * @param sourceId - ID of the tile to copy.
+   * @param x - Target X coordinate on the canvas.
+   * @param y - Target Y coordinate on the canvas.
+   */
   function handleCopyTile(sourceId: string, x: number, y: number): void {
     const source = tiles().find((t) => t.id === sourceId);
     if (!source) return;
@@ -297,6 +411,10 @@ export function DashboardPanel(props: Props): JSX.Element {
     persistLayout(updated);
   }
 
+  /**
+   * Export the current tile layout as a downloadable JSON file.
+   * The filename includes the panel ID and today's date.
+   */
   function handleExport(): void {
     const json = JSON.stringify(tiles(), null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -429,17 +547,22 @@ export function DashboardPanel(props: Props): JSX.Element {
 
       {/* Tile canvas */}
       <div style={{ flex: '1', overflow: 'hidden', position: 'relative' }}>
-        <TileGrid
-          tiles={tiles()}
-          onLayoutChange={handleLayoutChange}
-          renderTile={renderTile}
-          onRemoveTile={handleRemoveTile}
-          onConfigureTile={setConfiguringTileId}
-          onRefreshTile={handleRefreshTile}
-          isRefreshingTile={(id) => refreshingIds().has(id)}
-          onTileCopy={handleCopyTile}
-          onAddAtPosition={(x, y) => { setAddAtPosition({ x, y }); setModalOpen(true); }}
-        />
+        <DashboardActionsProvider value={{
+          addTile: handleAddTile,
+          hasTileType: (type) => tiles().some((t) => t.type === type),
+        }}>
+          <TileGrid
+            tiles={tiles()}
+            onLayoutChange={handleLayoutChange}
+            renderTile={renderTile}
+            onRemoveTile={handleRemoveTile}
+            onConfigureTile={setConfiguringTileId}
+            onRefreshTile={handleRefreshTile}
+            isRefreshingTile={(id) => refreshingIds().has(id)}
+            onTileCopy={handleCopyTile}
+            onAddAtPosition={(x, y) => { setAddAtPosition({ x, y }); setModalOpen(true); }}
+          />
+        </DashboardActionsProvider>
       </div>
 
       {/* Add tile modal */}

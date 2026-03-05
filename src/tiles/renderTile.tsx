@@ -36,11 +36,19 @@ import { SHOPIFY_TILE_FACTORIES } from './shopify/index';
 import { REDDIT_TILE_FACTORIES } from './reddit/index';
 import { PRODUCTHUNT_TILE_FACTORIES } from './producthunt/index';
 import { RSS_TILE_FACTORIES } from './rss/index';
+import { FLINT_TILE_FACTORIES } from './flint/index';
 import { RestTile } from './sources/RestTile';
 import { WsTile } from './sources/WsTile';
 import { CustomApiTile } from './sources/CustomApiTile';
 import { GraphqlTile } from './sources/GraphqlTile';
 
+/**
+ * Flat list of every provider factory map, iterated in order by {@link renderTile}.
+ *
+ * Each element is a `Record<TileType, (tile: TileConfig) => JSX.Element>` exported
+ * from a provider's `index.ts`. Add a new provider's factories object here after
+ * creating the provider directory and its `index.ts`.
+ */
 const ALL_FACTORIES = [
   STRIPE_TILE_FACTORIES,
   GITHUB_TILE_FACTORIES,
@@ -78,9 +86,20 @@ const ALL_FACTORIES = [
   REDDIT_TILE_FACTORIES,
   PRODUCTHUNT_TILE_FACTORIES,
   RSS_TILE_FACTORIES,
+  FLINT_TILE_FACTORIES,
 ];
 
-/** Render the right component for any TileConfig */
+/**
+ * Factory function that maps a {@link TileConfig} to its JSX component.
+ *
+ * Resolution order:
+ * 1. Iterates `ALL_FACTORIES` looking for a provider factory keyed on `tile.type`.
+ * 2. Falls back to built-in generic source tiles (REST, WebSocket, Custom API, GraphQL).
+ * 3. Returns an error placeholder for unknown types.
+ *
+ * @param tile - The tile configuration to render.
+ * @returns The JSX element for the tile, or an error `<div>` for unknown types.
+ */
 export function renderTile(tile: TileConfig): JSX.Element {
   for (const factories of ALL_FACTORIES) {
     if (tile.type in factories) {

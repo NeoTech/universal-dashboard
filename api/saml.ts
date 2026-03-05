@@ -26,6 +26,10 @@ import { DOMParser as XmlDOMParser } from '@xmldom/xmldom';
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/**
+ * Configuration values extracted from an IdP metadata document.
+ * Consumed by {@link parseIdpMetadata} and passed to the SAML SP helpers.
+ */
 export interface IdpMetadata {
   /** IdP SSO redirect URL (HTTP-Redirect binding preferred, falls back to HTTP-POST). */
   entryPoint: string;
@@ -33,18 +37,6 @@ export interface IdpMetadata {
   cert: string;
 }
 
-/**
- * Parse a standard SAML 2.0 IdP metadata XML document (exported from Google
- * Workspace, Okta, Azure AD, etc.) and return the values needed to configure
- * the SP.  Pass the result straight into SAML_ENTRY_POINT / SAML_CERT.
- *
- * Extracts:
- *   - The first `<md:SingleSignOnService>` with HTTP-Redirect binding
- *     (falls back to HTTP-POST if Redirect is absent)
- *   - The first `<ds:X509Certificate>` in the signing `<md:KeyDescriptor>`
- *
- * @throws Error if the required elements are missing.
- */
 /**
  * Parse a single attribute value from an XML element's attribute string.
  * e.g. attrVal('Binding="foo" Location="bar"', 'Location') → 'bar'
@@ -73,6 +65,20 @@ function certFromKeyDescriptor(xml: string, use: string | null): string | null {
   return null;
 }
 
+/**
+ * Parse a standard SAML 2.0 IdP metadata XML document (exported from Google
+ * Workspace, Okta, Azure AD, etc.) and return the values needed to configure
+ * the SP. Pass the result straight into `SAML_ENTRY_POINT` / `SAML_CERT`.
+ *
+ * Extracts:
+ *   - The first `<md:SingleSignOnService>` with HTTP-Redirect binding
+ *     (falls back to HTTP-POST if Redirect is absent)
+ *   - The first `<ds:X509Certificate>` in the signing `<md:KeyDescriptor>`
+ *
+ * @param xml - Raw XML string of the IdP metadata document.
+ * @returns Parsed {@link IdpMetadata} with `entryPoint` and `cert`.
+ * @throws Error if the required elements are missing.
+ */
 export function parseIdpMetadata(xml: string): IdpMetadata {
   // ── Entry point ──────────────────────────────────────────────────────────
   // Regex-based to avoid DOMParser (not available in Bun server runtime).
@@ -107,7 +113,19 @@ export function parseIdpMetadata(xml: string): IdpMetadata {
   return { entryPoint, cert };
 }
 
-/** Build an undeflated SP AuthnRequest XML string. */
+/**
+ * Build an undeflated SAML 2.0 SP AuthnRequest XML string.
+ *
+ * The resulting XML should be passed to {@link deflateEncode} before being
+ * appended to the IdP redirect URL as the `SAMLRequest` query parameter.
+ *
+ * @param opts.id - Unique request ID (e.g. a UUIDv4 prefixed with `_`).
+ * @param opts.issueInstant - ISO 8601 timestamp of the request.
+ * @param opts.entryPoint - IdP HTTP-Redirect SSO endpoint URL.
+ * @param opts.issuer - SP entity ID (`SAML_ISSUER` env var).
+ * @param opts.callbackUrl - SP Assertion Consumer Service URL (`SAML_CALLBACK_URL`).
+ * @returns Uncompressed AuthnRequest XML string.
+ */
 export function buildAuthnRequest(opts: {
   id: string;
   issueInstant: string;
@@ -129,12 +147,27 @@ export function buildAuthnRequest(opts: {
   ].join('');
 }
 
-/** Deflate + base64-encode for HTTP-Redirect binding SAMLRequest parameter. */
+/**
+ * Deflate (raw DEFLATE, no zlib header) and base64-encode an XML string
+ * for use as the `SAMLRequest` query parameter in the HTTP-Redirect binding.
+ *
+ * @param xml - Uncompressed XML string (typically an AuthnRequest).
+ * @returns Base64-encoded deflated bytes.
+ */
 export function deflateEncode(xml: string): string {
   return deflateRawSync(Buffer.from(xml, 'utf8')).toString('base64');
 }
 
-/** Build SP metadata XML (for registering this SP with the IdP). */
+/**
+ * Build SP metadata XML suitable for uploading to an IdP during SP registration.
+ *
+ * The generated document declares a single `AssertionConsumerService` using
+ * the HTTP-POST binding with `WantAssertionsSigned="true"`.
+ *
+ * @param opts.entityId - SP entity ID (typically the app's base URL or a URN).
+ * @param opts.callbackUrl - Assertion Consumer Service URL where the IdP should POST assertions.
+ * @returns XML string of the SP metadata document.
+ */
 export function buildSpMetadata(opts: { entityId: string; callbackUrl: string }): string {
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
@@ -239,9 +272,18 @@ export function verifySamlResponse(base64Response: string, idpCert: string): str
 // Handles the subset required for SAML signature operations.
 
 /**
- * Serialize `el` using Exclusive Canonical XML.
- * `inherited` is the set of (prefix→uri) namespace bindings visible from
- * the parent context (empty at the top level).
+ * Serialize `el` using Exclusive Canonical XML (exc-C14N).
+ *
+ * Reference: https://www.w3.org/TR/xml-exc-c14n/
+ *
+ * Used internally by {@link verifySamlResponse} to produce the canonical byte
+ * sequences over which SAML digest and signature values are computed. Also
+ * exported so the unit-test suite can verify the canonicalization in isolation.
+ *
+ * @param el - DOM Element to canonicalize.
+ * @param inherited - Namespace bindings (prefix → URI) visible from the parent
+ *   element. Pass an empty `Map` (or omit) for the document root.
+ * @returns Canonicalized UTF-8 string representation of the element subtree.
  */
 export function excC14n(el: Element, inherited: Map<string, string> = new Map()): string {
   // Collect namespaces visibly utilised in this subtree

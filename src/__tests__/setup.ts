@@ -45,3 +45,18 @@ Object.defineProperty(globalThis, 'EventSource', {
   writable: true,
   configurable: true,
 });
+
+// --- ResizeObserver mock -----------------------------------------------
+// jsdom does not implement ResizeObserver; stub it so useFlintDensity
+// can be imported in tests without throwing "ResizeObserver is not defined".
+class MockResizeObserver {
+  observe(): void { /* noop */ }
+  unobserve(): void { /* noop */ }
+  disconnect(): void { /* noop */ }
+}
+
+Object.defineProperty(globalThis, 'ResizeObserver', {
+  value: MockResizeObserver,
+  writable: true,
+  configurable: true,
+});

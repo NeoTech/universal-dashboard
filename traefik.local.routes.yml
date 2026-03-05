@@ -1,0 +1,42 @@
+http:
+  middlewares:
+    gzip-compress:
+      compress: {}
+
+  routers:
+    traefik-dashboard:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - admin
+      priority: 100
+      service: api@internal
+
+    twm-api:
+      rule: "PathPrefix(`/api`) || PathPrefix(`/health`) || PathPrefix(`/ws`)"
+      entryPoints:
+        - web
+      priority: 10
+      service: twm-api
+      middlewares:
+        - gzip-compress
+
+    twm-dashboard:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - web
+      priority: 1
+      service: twm-dashboard
+      middlewares:
+        - gzip-compress
+
+  services:
+    twm-api:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:3001"
+
+    twm-dashboard:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:5187"
+

@@ -17,8 +17,23 @@ const stmtUpsertLayout = authDb.prepare<void, [number, string, string, number]>(
 );
 
 /**
- * Return the tile layout for a given user + workspace.
- * Falls back to an empty array if no layout has been saved yet.
+ * Return the tile layout for a given user + workspace from the `tile_layouts`
+ * table in `auth.db`.
+ *
+ * Each element in the returned array is a plain tile object matching the shape
+ * stored by {@link writeLayout}, e.g.:
+ * ```json
+ * { "id": "<uuid>", "type": "stripe-payments", "x": 8, "y": 8, "w": 400, "h": 300 }
+ * ```
+ *
+ * Falls back to an empty array when:
+ * - no row exists yet for the `userId`/`workspace` pair, or
+ * - the stored JSON is unparseable.
+ *
+ * @param userId   - The authenticated user's numeric ID from `auth.db`.
+ * @param workspace - The workspace (dashboard) name, e.g. `"dashboard-1"`.
+ * @returns An array of tile objects (possibly empty). The caller should treat
+ *          each element as `Record<string, unknown>` and narrow types as needed.
  */
 export function readLayout(userId: number, workspace: string): unknown[] {
   const row = stmtGetLayout.get(userId, workspace);
@@ -26,6 +41,13 @@ export function readLayout(userId: number, workspace: string): unknown[] {
   try { return JSON.parse(row.tiles_json) as unknown[]; } catch { return []; }
 }
 
+/**
+ * Return the list of workspace names that have a saved layout for `userId`,
+ * ordered by most-recently updated first.
+ *
+ * @param userId - The authenticated user's numeric ID from `auth.db`.
+ * @returns An array of workspace name strings, possibly empty.
+ */
 export function listWorkspaces(userId: number): string[] {
   const rows = authDb.prepare<{ workspace: string }, [number]>(
     'SELECT workspace FROM tile_layouts WHERE user_id = ? ORDER BY updated_at DESC',
@@ -86,7 +108,19 @@ export function getRedditMaxFetchLimit(): number {
 }
 
 /**
- * Persist a tile layout for a given user + workspace.
+ * Persist a tile layout for a given user + workspace into the `tile_layouts`
+ * table in `auth.db`.
+ *
+ * Uses an **upsert** — if a row already exists for the `userId`/`workspace`
+ * pair it is overwritten; otherwise a new row is inserted. The `tiles` array
+ * is serialised to JSON and stored in the `tiles_json` column. `updated_at`
+ * is set to the current Unix epoch (seconds).
+ *
+ * @param userId    - The authenticated user's numeric ID from `auth.db`.
+ * @param workspace - The workspace (dashboard) name, e.g. `"dashboard-1"`.
+ * @param tiles     - Full replacement tile array. The entire column is
+ *                    overwritten; callers must read ({@link readLayout}),
+ *                    mutate, and then write back.
  */
 export function writeLayout(userId: number, workspace: string, tiles: unknown[]): void {
   stmtUpsertLayout.run(userId, workspace, JSON.stringify(tiles), Math.floor(Date.now() / 1000));
@@ -96,9 +130,19 @@ export function writeLayout(userId: number, workspace: string, tiles: unknown[])
 
 /**
  * Maps SSE channel names to the tile type(s) that consume them.
- * Only exceptions are listed — channels where the name differs from the tile
- * type, or where multiple tile types share the same channel.
- * Exported so server.ts can build the reverse mapping without duplication.
+ *
+ * Only non-identity mappings are listed here — channels whose SSE event name
+ * differs from the tile `type` string, or where multiple tile types share a
+ * single broadcast channel.  For all other channels the tile type equals the
+ * channel name and no entry is needed.
+ *
+ * Exported so `server.ts` can build the reverse look-up (`tileTypeToChannel`)
+ * without duplicating the data, and so `hasActiveTiles()` can resolve a
+ * channel to the full set of consuming tile types.
+ *
+ * @example
+ * // 'hibp-breaches' channel is consumed by two different tile types:
+ * CHANNEL_TO_TILE_TYPES['hibp-breaches'] // ['hibp-breach-status', 'hibp-recent-breaches']
  */
 export const CHANNEL_TO_TILE_TYPES: Record<string, string[]> = {
   'github-runs':         ['github-actions'],
@@ -112,6 +156,12 @@ export const CHANNEL_TO_TILE_TYPES: Record<string, string[]> = {
   'virustotal-analyses': ['virustotal-domain-threats', 'virustotal-url-scan'],
   'hn-top-stories':      ['hn-top-stories', 'hn-mentions'],
   'reddit-posts':        ['reddit-posts', 'reddit-hot-posts', 'reddit-keyword-monitor'],
+  // FLINT / LOPC e-commerce
+  'flint-session':         ['flint-auth'],
+  'flint-dashboard':       ['flint-overview'],
+  'flint-sales':           ['flint-sales-chart'],
+  'flint-customer-report': ['flint-customer-reports'],
+  'flint-webhooks':        ['flint-webhook-monitor'],
 };
 
 const stmtAllLayouts = authDb.prepare<{ tiles_json: string }, []>(
@@ -119,9 +169,26 @@ const stmtAllLayouts = authDb.prepare<{ tiles_json: string }, []>(
 );
 
 /**
- * Return true if at least one tile consuming `channel` exists in any workspace
- * across all users.  Used by the poll loop to skip external API calls when no
- * tile is currently displaying that channel's data.
+ * Return `true` if at least one tile that consumes `channel` exists in any
+ * workspace across all users in the database.
+ *
+ * ### How it works
+ * 1. Looks up the set of tile type strings for `channel` via
+ *    {@link CHANNEL_TO_TILE_TYPES}.  Falls back to `[channel]` when no
+ *    explicit mapping exists (identity channels).
+ * 2. Scans every `tile_layouts` row in SQLite, parses the JSON array, and
+ *    checks whether any tile's `type` field is in that set.
+ * 3. Short-circuits on the first match for performance.
+ *
+ * ### Why it exists
+ * The poll loop calls this before making an external API request.  When no
+ * user has the corresponding tile on any dashboard, the fetch is skipped
+ * entirely — saving bandwidth and API quota while the server is otherwise
+ * running normally.
+ *
+ * @param channel - The SSE event / channel name (e.g. `'github-runs'`).
+ * @returns `true` if a consuming tile was found; `false` if the channel has
+ *   no active tiles and the poll can be safely skipped.
  */
 export function hasActiveTiles(channel: string): boolean {
   const types = CHANNEL_TO_TILE_TYPES[channel] ?? [channel];

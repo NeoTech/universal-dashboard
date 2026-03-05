@@ -10,7 +10,21 @@
 export const API_BASE_URL: string = (() => {
   if (typeof import.meta !== 'undefined') {
     const env = (import.meta as { env?: Record<string, string> }).env;
-    if (env?.['VITE_API_URL'] !== undefined) return env['VITE_API_URL'];
+    if (env?.['VITE_API_URL'] !== undefined) {
+      const configured = env['VITE_API_URL'].trim();
+      if (!configured) return '';
+      if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+        try {
+          const parsed = new URL(configured);
+          const isHttpLocalhost = parsed.protocol === 'http:'
+            && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
+          if (isHttpLocalhost) return '';
+        } catch {
+          // Non-absolute values (e.g. '/api') are valid; keep as configured.
+        }
+      }
+      return configured;
+    }
   }
   return '';
 })();

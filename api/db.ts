@@ -13,6 +13,15 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AUTH_DB_PATH = join(__dirname, '..', 'auth.db');
 
+/**
+ * Shared SQLite database connection for `auth.db`.
+ *
+ * Uses WAL journal mode to allow concurrent reads from `server.ts` and
+ * `mcp-layout.ts` without lock contention. The database file is created
+ * automatically next to the workspace root if it does not exist.
+ *
+ * Schema managed by inline `CREATE TABLE IF NOT EXISTS` migrations below.
+ */
 export const authDb = new Database(AUTH_DB_PATH, { create: true });
 authDb.run('PRAGMA journal_mode=WAL');
 

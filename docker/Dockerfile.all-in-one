@@ -1,0 +1,55 @@
+FROM oven/bun:1 AS frontend-build
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY src/ ./src/
+COPY public/ ./public/
+COPY index.html ./
+COPY tsconfig.json ./
+COPY vite.config.ts ./
+
+RUN bun run build
+
+FROM oven/bun:1 AS backend-build
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY api/ ./api/
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+RUN bun build ./api/server.ts --target=bun --outfile ./dist/server.js
+
+FROM traefik:v3 AS traefik-bin
+
+FROM ngrok/ngrok:latest AS ngrok-bin
+
+FROM oven/bun:1
+WORKDIR /app
+
+COPY --from=frontend-build /app/dist ./dist
+COPY --from=backend-build /app/dist/server.js ./dist/server.js
+
+COPY docker/static-server.ts ./docker/static-server.ts
+COPY traefik.local.yml ./traefik.local.yml
+COPY traefik.local.routes.yml ./traefik.local.routes.yml
+COPY docker/all-in-one-entrypoint.sh ./docker/all-in-one-entrypoint.sh
+
+COPY --from=traefik-bin /usr/local/bin/traefik /usr/local/bin/traefik
+COPY --from=ngrok-bin /ngrok /usr/local/bin/ngrok
+
+RUN chmod +x ./docker/all-in-one-entrypoint.sh
+
+ENV API_HOST=0.0.0.0
+ENV API_PORT=3001
+ENV FRONTEND_PORT=5187
+ENV TRAEFIK_WEB_PORT=8080
+ENV TRAEFIK_ADMIN_PORT=8081
+
+EXPOSE 8080 8081 4040
+
+CMD ["/app/docker/all-in-one-entrypoint.sh"]

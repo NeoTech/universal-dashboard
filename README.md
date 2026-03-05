@@ -11,22 +11,56 @@ A developer dashboard built with SolidJS + Bun that aggregates data from dozens 
 ```bash
 bun install
 cp .env.example .env   # see Environment Variables below
-bun run dev            # Vite frontend on :8080 + API server on :3001
+bun run dev            # Vite frontend on :5187
+bun run api            # API server on :3001
 ```
 
-Open [http://localhost:8080](http://localhost:8080). The dashboard works immediately with no keys configured — generic tiles (REST, WebSocket, RSS, GraphQL) are always available, and provider tiles activate as you add their credentials to `.env`.
+Open [http://localhost:5187](http://localhost:5187) for direct Vite dev, or [http://localhost:8080](http://localhost:8080) when running through Traefik. The dashboard works immediately with no keys configured — generic tiles (REST, WebSocket, RSS, GraphQL) are always available, and provider tiles activate as you add their credentials to `.env`.
 
 ### Available scripts
 
 | Command | Description |
 |---------|-------------|
-| `bun run dev` | Start both Vite frontend (:8080) and API server (:3001) together |
+| `bun run dev` | Vite frontend dev server only (`:5187`) |
 | `bun run api` | API server only |
 | `bun run watch-api` | API server with file-watch restart |
 | `bun run build` | Production build |
+| `bun run build:backend` | Build backend artifact to `dist/server.js` |
+| `bun run prod:serve:backend` | Run backend from built artifact (`dist/server.js`) |
 | `bun run test` | Unit + integration tests |
 | `bun run typecheck` | TypeScript type check |
 | `bun run lint` | ESLint |
+
+---
+
+## Documentation
+
+- [Architecture overview](docs/architecture.md) — system diagram, request lifecycle, and component responsibility map
+- [Provider framework](docs/providers.md) — how providers are structured and how to add a new one
+- [SSE & polling](docs/sse.md) — real-time data pipeline from server polls to browser tiles
+- [Authentication](docs/auth.md) — local auth and SAML SSO configuration
+- [MCP tools](docs/mcp.md) — full reference for all MCP tool calls (add_tile, remove_tile, etc.)
+- [Tile system](docs/tiles.md) — tile lifecycle, config schema, and how to register a new tile type
+- [Frontend architecture](docs/frontend.md) — SolidJS signal topology, DashboardPanel lifecycle, keybindings
+- [UI primitives](docs/ui-primitives.md) — component catalogue, CSS token system, theming
+- [Testing](docs/testing.md) — test pyramid, how to run tests, how to write new tile tests
+- [Environment variables](docs/env-vars.md) — complete reference for all env vars grouped by provider
+- [Provider catalog](docs/provider-catalog.md) — all 35+ providers: tiles, channels, env vars, and notes
+- [Docker deployment](docs/docker.md) — all-in-one local container (frontend + API + Traefik + optional ngrok)
+
+---
+
+## Docker (all-in-one)
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.all-in-one.yml up --build
+```
+
+Then open:
+
+- App: [http://localhost:8080](http://localhost:8080)
+- Traefik dashboard: [http://localhost:8081](http://localhost:8081)
 
 ---
 
@@ -89,8 +123,8 @@ When `AUTH_ENABLED=false` (default) the dashboard is open with no login required
 
 ```env
 API_PORT=3001                 # API server port
-FIXTURES_PORT=8080            # Vite dev server port
-VITE_API_URL=                 # leave empty — Vite proxies /api/* to localhost:3001 automatically
+FIXTURES_PORT=8080            # fixtures/static test server port
+VITE_API_URL=                 # leave empty — relative /api (recommended with Traefik/ngrok)
 ```
 
 ---

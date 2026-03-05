@@ -3,8 +3,8 @@ import solidPlugin from 'vite-plugin-solid';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Manually parse .env at config time so VITE_API_URL is available for the proxy
-// target before Vite's own env loading runs.  Falls back to process.env (useful
+// Manually parse .env at config time so VITE_API_URL / VITE_PROXY_TARGET are
+// available for the proxy target before Vite's own env loading runs. Falls back to process.env (useful
 // when the variable is exported in the shell before running `bun run dev`).
 function readDotEnvKey(key: string): string | undefined {
   const envPath = join(process.cwd(), '.env');
@@ -19,7 +19,20 @@ function readDotEnvKey(key: string): string | undefined {
   return undefined;
 }
 
-const apiTarget = process.env['VITE_API_URL'] ?? readDotEnvKey('VITE_API_URL') ?? 'http://localhost:3001';
+function readConfigValue(key: string): string | undefined {
+  const value = (process.env[key] ?? readDotEnvKey(key))?.trim();
+  return value ? value : undefined;
+}
+
+const browserApiUrl = readConfigValue('VITE_API_URL');
+const apiTarget = readConfigValue('VITE_PROXY_TARGET')
+  ?? ((browserApiUrl?.startsWith('http://') || browserApiUrl?.startsWith('https://')) ? browserApiUrl : undefined)
+  ?? 'http://localhost:3001';
+const wsTarget = readConfigValue('VITE_WS_PROXY_TARGET')
+  ?? (apiTarget.startsWith('https://') ? `wss://${apiTarget.slice('https://'.length)}`
+    : apiTarget.startsWith('http://') ? `ws://${apiTarget.slice('http://'.length)}`
+    : apiTarget.startsWith('wss://') || apiTarget.startsWith('ws://') ? apiTarget
+    : 'ws://localhost:3001');
 
 export default defineConfig({
   plugins: [solidPlugin()],
@@ -30,11 +43,12 @@ export default defineConfig({
     format: 'es',
   },
   server: {
-    port: 8080,
+    port: 5187,
     allowedHosts: true,
     proxy: {
       '/api':    { target: apiTarget, changeOrigin: true },
       '/health': { target: apiTarget, changeOrigin: true },
+      '/ws':     { target: wsTarget, changeOrigin: true, ws: true },
     },
     // Don't restart the Vite dev server when .env changes.
     // The API server reads .env directly from disk; only VITE_* vars affect

@@ -32,10 +32,27 @@ const PAD_TOP = 10;     // headroom so the tallest point isn't clipped
 const PAD_BOTTOM = 10;  // footroom
 const GUIDE_LEVELS = [0, 0.25, 0.5, 0.75, 1]; // fractional Y positions for guide lines
 
+/**
+ * Clamp `v` to the closed interval `[lo, hi]`.
+ *
+ * @param v - Value to clamp.
+ * @param lo - Lower bound (inclusive).
+ * @param hi - Upper bound (inclusive).
+ * @returns The clamped value.
+ */
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/**
+ * Format a numeric price for display in the Y-axis labels.
+ *
+ * Chooses an appropriate number of decimal places based on magnitude so that
+ * labels remain readable regardless of whether the value is $0.0001 or $50,000.
+ *
+ * @param v - The price value.
+ * @returns A locale-formatted string with adaptive precision.
+ */
 function formatPrice(v: number): string {
   if (Math.abs(v) >= 10_000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (Math.abs(v) >= 100)   return v.toFixed(2);

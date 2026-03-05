@@ -1,9 +1,13 @@
 import { For } from 'solid-js';
 import type { JSX } from 'solid-js';
 
+/** Descriptor for a single tab in a {@link TabBar}. */
 export interface Tab {
+  /** Stable identifier used to match the active tab and invoke callbacks. */
   id: string;
+  /** Display text shown in the tab button. */
   label: string;
+  /** Content type key used by the panel renderer to select the view. */
   contentType: string;
 }
 

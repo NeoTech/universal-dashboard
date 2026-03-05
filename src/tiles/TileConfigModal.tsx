@@ -1,7 +1,7 @@
 import { createSignal, Show } from 'solid-js';
 import type { JSX } from 'solid-js';
 import type { TileConfig } from './TileConfig';
-import { TILE_POLL_MS, TILE_SSE_CHANNEL, WEBHOOK_CAPABLE, WEBHOOK_PROVIDER } from './TileConfig';
+import { TILE_POLL_MS, TILE_SSE_CHANNEL, WEBHOOK_CAPABLE, WEBHOOK_PROVIDER, WS_MANAGED_TILES } from './TileConfig';
 import { API_BASE_URL } from '../data/api';
 
 interface Props {
@@ -86,6 +86,7 @@ export function TileConfigModal(props: Props): JSX.Element {
   // Test-connection state (shared between REST and WS sections)
   const [testStatus, setTestStatus] = createSignal<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
+  const supportsPolling = () => !WS_MANAGED_TILES.has(props.tile.type);
 
   async function testConnection(type: 'rest' | 'ws' | 'graphql'): Promise<void> {
     setTestStatus('loading');
@@ -131,7 +132,7 @@ export function TileConfigModal(props: Props): JSX.Element {
     const updated: TileConfig = {
       ...props.tile,
       title: title().trim() || undefined,
-      refreshInterval: ms,
+      refreshInterval: supportsPolling() ? ms : 0,
       pageSize: (ps >= 1 && ps <= 200) ? ps : undefined,
       fetchLimit: (fl >= 1) ? fl : undefined,
       showLastUpdated: showLastUpdated(),
@@ -288,7 +289,7 @@ export function TileConfigModal(props: Props): JSX.Element {
             </Show>
           </Show>
 
-          <Show when={deliveryMode() === 'poll' || !WEBHOOK_CAPABLE.has(props.tile.type)}>
+          <Show when={supportsPolling() && (deliveryMode() === 'poll' || !WEBHOOK_CAPABLE.has(props.tile.type))}>
             <label class="field">
               <span class="field__label">Refresh interval (seconds)</span>
               <input class="field__input" type="number" min="0"

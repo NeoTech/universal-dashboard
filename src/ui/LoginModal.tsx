@@ -11,6 +11,25 @@ interface LoginResponse {
   error?: string;
 }
 
+/**
+ * Modal login UI that gates access to the dashboard when `AUTH_ENABLED=true`.
+ *
+ * Renders one of two modes depending on the server's active auth provider:
+ *
+ * - **Local** (`AUTH_PROVIDER=local`): username/password form that supports
+ *   both `login` and `register` modes. On success, calls `auth.login()` to
+ *   store the JWT and user in context + `localStorage`.
+ *
+ * - **SAML SSO** (`AUTH_PROVIDER=saml`): a single "Sign in with SSO" button
+ *   that redirects the browser to the IdP via `/api/auth/saml/login`. After
+ *   the IdP posts the assertion back to the ACS endpoint the server redirects
+ *   to the frontend with `?token=<jwt>`, which {@link AuthProvider} consumes.
+ *
+ * This component reads auth state via {@link useAuth} and must be rendered
+ * inside an `<AuthProvider>`.
+ *
+ * @returns The full-screen login overlay JSX element.
+ */
 export function LoginModal(): JSX.Element {
   const auth = useAuth();
 

@@ -6,7 +6,12 @@
     "dev": "vite",
     "api": "bun run api/server.ts",
     "watch-api": "bun api/watch.ts",
+    "build:backend": "bun build ./api/server.ts --target=bun --outfile ./dist/server.js",
+    "prod:serve:backend": "bun run ./dist/server.js",
+    "prod:backend": "bun run build:backend && bun run start:backend",
     "build": "tsc && vite build",
+    "prod": "tsc && bun run build && bunx serve -s dist -l 5187",
+    "prod:serve:frontend": "bunx serve -s dist -l 5187",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -22,10 +27,12 @@
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
     "@types/node": "^25.3.1",
+    "@types/ws": "^8.18.1",
     "@types/xmldom": "^0.1.34",
     "@typescript-eslint/eslint-plugin": "^8.26.0",
     "@typescript-eslint/parser": "^8.26.0",
     "@vitest/coverage-v8": "4",
+    "drizzle-kit": "^0.31.9",
     "eslint": "^9.21.0",
     "eslint-config-prettier": "^10.1.8",
     "jsdom": "^28.1.0",
@@ -38,8 +45,10 @@
   "dependencies": {
     "@xmldom/xmldom": "^0.8.11",
     "alpinejs": "^3.15.8",
+    "drizzle-orm": "^0.45.1",
     "htmx.org": "^2.0.8",
     "solid-js": "^1.9.11",
-    "stripe": "^20.4.0"
+    "stripe": "^20.4.0",
+    "ws": "^8.19.0"
   }
 }

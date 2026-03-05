@@ -19,10 +19,14 @@ import { DashboardPanel } from './panels/DashboardPanel';
 import { useSseChannel } from './ui/useSseChannel';
 import { AuthProvider, useAuth } from './ui/AuthContext';
 import { LoginModal } from './ui/LoginModal';
-import { clearTileLayout, saveTileLayout, deleteLayoutFromServer, saveLayoutToServer, loadWorkspacesFromServer } from './tiles/tilePersistence';
+import { clearTileLayout, deleteLayoutFromServer, loadWorkspacesFromServer } from './tiles/tilePersistence';
 import { API_BASE_URL } from './data/api';
 
+/**
+ * Props accepted by the top-level {@link App} component.
+ */
 interface Props {
+  /** Resolved application configuration (keybindings, theme, workspace name). */
   config: TwmConfig;
 }
 
@@ -31,6 +35,17 @@ const IS_MAC =
   typeof navigator !== 'undefined' &&
   /mac/i.test(navigator.platform);
 
+/**
+ * Inner application shell rendered after authentication has resolved.
+ *
+ * Instantiates all top-level managers (WorkspaceManager, DashboardManager,
+ * KeybindingRegistry) and wires together the signal graph:
+ * DashboardManager state → dashIds / activeDashIdx signals → rendered
+ * DashboardPanel slots. Also registers all global keyboard shortcuts and
+ * listens for SSE `tile-op` events that remove dashboards via MCP.
+ *
+ * @param props - Application configuration including keybindings and theme.
+ */
 function AppInner(props: Props): JSX.Element {
   // ── Managers ───────────────────────────────────────────────────────────────
   new ThemeManager().setTheme(props.config.theme);
@@ -45,8 +60,6 @@ function AppInner(props: Props): JSX.Element {
   );
   const [isPaletteOpen, setPaletteOpen] = createSignal(false);
   const [isHelpOpen,    setHelpOpen]    = createSignal(false);
-  /** Maps panelId → content type; all panels default to 'dashboard' */
-  const [panelTypes] = createSignal<Record<string, string>>({});
   /** Reactive viewport — tracks actual window dimensions */
   const [viewport, setViewport] = createSignal({
     x: 0, y: 0,
@@ -91,15 +104,12 @@ function AppInner(props: Props): JSX.Element {
       label: 'New Dashboard',
       run: () => {
         if (!dm.canAdd) return;
-        const newId = dm.add();
-        if (newId) {
-          // Pre-populate localStorage so DashboardPanel.onMount finds data and
-          // skips the "no local data" path (which would flash default tiles then
-          // overwrite them). Save an empty array — the panel's defaultTiles()
-          // will generate the correct initial layout and persist it.
-          saveTileLayout(newId, []);
-          void saveLayoutToServer(newId, [], API_BASE_URL);
-        }
+        dm.add();
+        // Do NOT pre-seed localStorage here. DashboardPanel.onMount will read
+        // null from localStorage and null from the server, correctly fall into
+        // the "neither has data" branch, generate defaultTiles(), and persist
+        // them to both stores. Pre-seeding [] would make the panel think the
+        // dashboard was intentionally cleared and show nothing instead.
         setDashIds(dm.ids);
         setActiveDashIdx(dm.activeIndex);
       },
@@ -167,22 +177,29 @@ function AppInner(props: Props): JSX.Element {
     // ── Reconcile dashboard list with server ──────────────────────────────
     // Process any deletes that failed on a previous session
     if (auth.isAuthenticated()) {
+      // Read deleted IDs BEFORE clearing the key so we can filter them from
+      // loadWorkspacesFromServer even if the server hasn't processed the
+      // DELETE yet (avoids resurrection of closed dashboards on reload).
+      const deletedIds = new Set<string>();
       try {
         const raw = localStorage.getItem('twm:pending-deletes');
         if (raw) {
           const pending: string[] = JSON.parse(raw);
           localStorage.removeItem('twm:pending-deletes');
           for (const ws of pending) {
+            deletedIds.add(ws);
             void deleteLayoutFromServer(ws, API_BASE_URL);
           }
         }
       } catch { /* noop */ }
 
-      // Discover server-only dashboards (e.g. created by MCP while offline)
+      // Discover server-only dashboards (e.g. created by MCP while offline).
+      // Exclude any workspace that was just deleted above — the fire-and-forget
+      // DELETE may not have reached the server yet when this query runs.
       void loadWorkspacesFromServer(API_BASE_URL).then((serverWs) => {
         if (!serverWs.length) return;
         const localIds = new Set(dm.ids);
-        const newIds = serverWs.filter((ws) => !localIds.has(ws));
+        const newIds = serverWs.filter((ws) => !localIds.has(ws) && !deletedIds.has(ws));
         if (newIds.length === 0) return;
         // Add server-only dashboards to the local registry
         for (const ws of newIds) dm.addExisting(ws);
@@ -220,11 +237,16 @@ function AppInner(props: Props): JSX.Element {
   // ── Panel renderer ─────────────────────────────────────────────────────────
   // The BSP tree is kept as a single leaf; all dashboards are rendered here
   // and only the active one is visible. We ignore the BSP leaf id.
+  /**
+   * Render all dashboard slots inside the BSP leaf.
+   *
+   * All DashboardPanel instances are mounted simultaneously; only the active
+   * one is visible (`display: flex`). This preserves each panel's reactive
+   * state and SSE subscriptions across dashboard switches.
+   *
+   * @param _id - BSP leaf ID (unused — the layout is always a single leaf).
+   */
   function renderPanel(_id: string): JSX.Element {
-    const type = panelTypes()[_id] ?? 'dashboard';
-    if (type !== 'dashboard') {
-      return <div class="panel-placeholder" data-type={type} />;
-    }
     return (
       <Index each={dashIds()}>
         {(dashId, i) => (
@@ -286,6 +308,17 @@ function AppInner(props: Props): JSX.Element {
   );
 }
 
+/**
+ * Root application component.
+ *
+ * Wraps {@link AppInner} with context providers required by every subtree:
+ * - `AuthProvider` — exposes SAML/JWT auth state via {@link useAuth}
+ * - `HintsProvider` — exposes contextual keyboard hint state via {@link useHints}
+ * - `AuthGate` — blocks rendering until auth status is known and the user is
+ *   authenticated (or auth is disabled).
+ *
+ * @param props - Application configuration forwarded to {@link AppInner}.
+ */
 export function App(props: Props): JSX.Element {
   return (
     <AuthProvider>

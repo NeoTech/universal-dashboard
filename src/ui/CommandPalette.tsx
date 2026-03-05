@@ -1,9 +1,13 @@
 import { createSignal, createEffect, For, Show } from 'solid-js';
 import type { JSX, Accessor } from 'solid-js';
 
+/** A single entry in the {@link CommandPalette} command list. */
 export interface Command {
+  /** Stable identifier used to track the command across re-renders. */
   id: string;
+  /** Human-readable label shown in the list and searched by the filter. */
   label: string;
+  /** Callback invoked when the command is selected via Enter or click. */
   run: () => void;
 }
 
@@ -13,6 +17,12 @@ interface Props {
   onClose?: () => void;
 }
 
+/**
+ * Convert a string to lowercase for case-insensitive substring matching.
+ *
+ * @param s - Input string.
+ * @returns Lowercased copy of `s`.
+ */
 function normalise(s: string): string {
   return s.toLowerCase();
 }

@@ -3,7 +3,7 @@ import type { JSX } from 'solid-js';
 import type { WsTileConfig } from '../TileConfig';
 import { useTileRefresh } from '../TileRefreshContext';
 import { sseReceivedAt, setSseRevision } from '../../ui/useSseChannel';
-import { BaseTile } from '../BaseTile';
+import { BaseWsTile as BaseTile } from '../BaseWsTile';
 import { MiniChart } from '../../ui/MiniChart';
 import { API_BASE_URL } from '../../data/api';
 
@@ -191,7 +191,17 @@ export function WsTile(props: Props): JSX.Element {
       destroyed = true;
       if (retryTimer !== null) clearTimeout(retryTimer);
       clearTimeout(reportTimer);
-      ws?.close();
+      if (ws) {
+        // Null all handlers before closing so no callbacks fire on a
+        // just-unmounted component. Without this the browser logs
+        // "WebSocket closed before connection established" for every
+        // effect teardown that happens while ws is still CONNECTING.
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        ws.close();
+      }
     });
   });
 
@@ -213,7 +223,7 @@ export function WsTile(props: Props): JSX.Element {
   const hasChart = () => Boolean(props.config.chartField);
 
   return (
-    <BaseTile class="ws-tile">
+    <BaseTile class="ws-tile" autoRefreshOnMount={false}>
       <div class={`ws-status ws-status--${status() === 'reconnecting' ? 'connecting' : status()}`}>{statusLabel()}</div>
       <Show when={hasChart()}>
         <div class="mini-chart__toggle">

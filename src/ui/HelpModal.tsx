@@ -2,9 +2,15 @@ import { createEffect, onCleanup, Show } from 'solid-js';
 import type { JSX, Accessor } from 'solid-js';
 import type { TwmKeybindings } from '../config/config';
 
+/**
+ * Props accepted by {@link HelpModal}.
+ */
 interface Props {
+  /** Reactive accessor indicating whether the modal is open. */
   open: Accessor<boolean>;
+  /** Callback invoked when the user dismisses the modal (Escape or click outside). */
   onClose: () => void;
+  /** Current keybinding map, used to render live shortcut keys. */
   keybindings: TwmKeybindings;
 }
 
@@ -54,6 +60,20 @@ const INTERACTIONS: { action: string; description: string }[] = [
   { action: 'Click + Ctrl+Z',    description: 'Undo the last tile layout change' },
 ];
 
+/**
+ * Keyboard shortcuts and mouse interaction reference modal.
+ *
+ * Renders two sections inside an accessible `role="dialog"` overlay:
+ * 1. **Keyboard shortcuts** — driven by `KB_ROWS` + live `props.keybindings`.
+ *    Keys are formatted via {@link formatKey} which maps `mod` to `⌘` / `Ctrl`
+ *    based on detected platform.
+ * 2. **Mouse & drag interactions** — static list from `INTERACTIONS`.
+ *
+ * The modal closes on `Escape` (captured via a `keydown` listener registered
+ * in a `createEffect` and cleaned up automatically) or on backdrop click.
+ *
+ * @param props - Open state accessor, close callback, and current keybindings.
+ */
 export function HelpModal(props: Props): JSX.Element {
   // Close on Escape key
   createEffect(() => {

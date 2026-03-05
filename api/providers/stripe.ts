@@ -8,7 +8,11 @@ import type { ServerContext, ProviderRouteHandler } from './types.ts';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Order workflow status types & store ───────────────────────────────────────
+
+/** Allowed progression states for an order in the TWM fulfillment workflow. */
 export type OrderWorkflowStatus = 'new' | 'processing' | 'packing' | 'shipped' | 'done';
+
+/** Persisted record for a single order's workflow state (stored in SQLite). */
 export interface OrderStatusEntry { status: OrderWorkflowStatus; updatedAt: number; note?: string }
 
 const db = new Database(join(__dirname, '..', 'order-statuses.db'), { create: true });
@@ -52,6 +56,18 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 }
 
 // ── Stripe client (lazy) ──────────────────────────────────────────────────────
+/**
+ * Construct a `Stripe` SDK client using the `STRIPE_SECRET_KEY` environment
+ * variable. Returns `null` when the key is absent or is the placeholder value,
+ * so callers can gate Stripe-dependent routes without throwing.
+ *
+ * When `stripeApiUrl` differs from the default `https://api.stripe.com` the
+ * client is reconfigured to hit that host instead — useful for pointing at a
+ * local Stripe mock server (`stripe-mock`) during tests.
+ *
+ * @param stripeApiUrl - Optional base URL override. Defaults to `https://api.stripe.com`.
+ * @returns A configured `Stripe` instance, or `null` if the secret key is missing.
+ */
 export function getStripe(stripeApiUrl?: string): Stripe | null {
   const key = process.env['STRIPE_SECRET_KEY'];
   if (!key || key.startsWith('sk_test_your')) return null;
@@ -66,6 +82,13 @@ export function getStripe(stripeApiUrl?: string): Stripe | null {
   return new Stripe(key, cfg);
 }
 
+/**
+ * Write a `503 Service Unavailable` JSON response indicating that Stripe has
+ * not been configured. Route handlers call this when `getStripe()` returns
+ * `null` so the client receives a clear error instead of a silent failure.
+ *
+ * @param res - The active HTTP response object.
+ */
 export function noStripe(res: ServerResponse): void {
   json(res, 503, { error: 'Stripe not configured. Add STRIPE_SECRET_KEY to .env' });
 }
@@ -483,6 +506,30 @@ export async function dataRevenue(stripe: Stripe): Promise<unknown> {
 }
 
 // ── register ──────────────────────────────────────────────────────────────────
+
+/**
+ * Register the Stripe provider with the TWM API server.
+ *
+ * Called once at server startup by `startPollers()` in `server.ts`. It:
+ * 1. Constructs a `Stripe` SDK client (no-op when `STRIPE_SECRET_KEY` is absent).
+ * 2. Registers recurring pollers via `ctx.poll()` for each Stripe SSE channel
+ *    (`stripe-payments`, `stripe-products`, `stripe-subscriptions`, etc.).
+ * 3. Returns a {@link ProviderRouteHandler} that handles all `/api/stripe/*`
+ *    REST routes and the `/api/webhooks/stripe` inbound webhook endpoint.
+ *
+ * **Poll intervals** (env vars, milliseconds):
+ * - `STRIPE_POLL_MS` (default 30 000) — payments, refunds, webhooks
+ * - `STRIPE_SLOW_POLL_MS` (default 60 000) — products, subscriptions, customers, invoices
+ * - `STRIPE_REVENUE_POLL_MS` (default 300 000) — revenue chart data
+ *
+ * **Webhook mode**: when `STRIPE_WEBHOOK_SECRET` is set the server auto-detects
+ * webhook delivery; periodic polling for the affected channels is suspended and
+ * an incoming `POST /api/webhooks/stripe` triggers an immediate re-fetch instead.
+ *
+ * @param ctx - The shared {@link ServerContext} injected by `server.ts`.
+ * @returns A route handler that claims all `path.startsWith('/api/stripe/')` requests
+ *          plus the unified `POST /api/webhooks/stripe` endpoint.
+ */
 export function register(ctx: ServerContext): ProviderRouteHandler {
   const stripe = getStripe(ctx.STRIPE_API_URL || 'https://api.stripe.com');
 

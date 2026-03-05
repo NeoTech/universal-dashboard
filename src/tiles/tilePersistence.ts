@@ -1,7 +1,18 @@
 import type { TileConfig } from './TileConfig';
 
+/** localStorage key prefix for tile layouts. Full key: `twm-tiles-<workspaceName>`. */
 const STORAGE_PREFIX = 'twm-tiles-';
 
+/**
+ * Persist a tile layout to localStorage for the given workspace.
+ *
+ * Serialises the tiles array as JSON. Errors are silently swallowed so the
+ * app continues to work in environments where localStorage is unavailable
+ * (e.g. SSR, private browsing, storage-full).
+ *
+ * @param workspaceName - Workspace identifier used as the storage key suffix.
+ * @param tiles         - Array of tile configs to persist.
+ */
 export function saveTileLayout(workspaceName: string, tiles: TileConfig[]): void {
   try {
     localStorage.setItem(`${STORAGE_PREFIX}${workspaceName}`, JSON.stringify(tiles));
@@ -10,6 +21,12 @@ export function saveTileLayout(workspaceName: string, tiles: TileConfig[]): void
   }
 }
 
+/**
+ * Read a tile layout from localStorage for the given workspace.
+ *
+ * @param workspaceName - Workspace identifier matching the key used in {@link saveTileLayout}.
+ * @returns The parsed tile array, or `null` if missing or unparseable.
+ */
 export function loadTileLayout(workspaceName: string): TileConfig[] | null {
   try {
     const raw = localStorage.getItem(`${STORAGE_PREFIX}${workspaceName}`);
@@ -20,6 +37,15 @@ export function loadTileLayout(workspaceName: string): TileConfig[] | null {
   }
 }
 
+/**
+ * Remove a tile layout from localStorage.
+ *
+ * Called when a workspace dashboard is closed or reset. After clearing
+ * localStorage, callers should also invoke {@link deleteLayoutFromServer} to
+ * remove the server-side copy.
+ *
+ * @param workspaceName - Workspace identifier to clear.
+ */
 export function clearTileLayout(workspaceName: string): void {
   try {
     localStorage.removeItem(`${STORAGE_PREFIX}${workspaceName}`);

@@ -1,0 +1,18 @@
+entryPoints:
+  web:
+    address: ":8080"
+  admin:
+    address: ":8081"
+
+providers:
+  file:
+    filename: "./traefik.local.routes.yml"
+    watch: true
+
+api:
+  dashboard: true
+
+log:
+  level: INFO
+
+accessLog: {}

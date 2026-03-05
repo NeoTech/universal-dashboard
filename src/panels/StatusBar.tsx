@@ -2,8 +2,13 @@ import { For } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { useHints } from '../ui/HintsContext';
 
+/**
+ * Props accepted by {@link StatusBar}.
+ */
 interface Props {
+  /** ID of the currently focused BSP panel leaf (displayed in the centre). */
   focusedPanelId: string;
+  /** Name of the active workspace (displayed on the left). */
   workspaceName: string;
   /** Number of dashboards currently open (1–4). Defaults to 1. */
   dashCount?: number;

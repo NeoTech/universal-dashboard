@@ -1,12 +1,27 @@
 import type { JSX } from 'solid-js';
 
+/** Props for {@link Sparkline}. */
 interface Props {
+  /** Ordered series of numeric values to plot. Requires at least 2 points. */
   data: number[];
+  /** SVG width in pixels. Default: 120. */
   w?: number;
+  /** SVG height in pixels. Default: 32. */
   h?: number;
+  /** CSS colour string for the polyline stroke. Default: `var(--twm-color-accent)`. */
   color?: string;
 }
 
+/**
+ * Tiny inline SVG line chart for embedding inside tile titlebars or table cells.
+ *
+ * Data is normalised to fill the full height, so only relative trends are
+ * conveyed — not absolute values. The element is `aria-hidden` because the
+ * numeric data should be accessible via surrounding text.
+ *
+ * @param props - See {@link Props}.
+ * @returns An `<svg>` polyline element, or an empty SVG when data is insufficient.
+ */
 export function Sparkline(props: Props): JSX.Element {
   const w = () => props.w ?? 120;
   const h = () => props.h ?? 32;

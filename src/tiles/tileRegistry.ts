@@ -1,18 +1,42 @@
 import type { TileType } from './TileConfig';
 
+/**
+ * Identifier for a tile category used in the Add Tile modal sidebar.
+ * 'all' is a virtual category that shows every registered tile.
+ */
 export type Category = 'all' | 'payments' | 'deployments' | 'ci' | 'infrastructure' | 'generic' | 'analytics' | 'finance' | 'security' | 'social' | 'comms' | 'productivity';
 
+/**
+ * Metadata record for a single tile type displayed in the Add Tile modal.
+ *
+ * Each entry in {@link TILE_REGISTRY} must implement this interface.
+ * The fields drive the modal search, category filter, and tile card UI.
+ */
 export interface TileDefinition {
+  /** The concrete tile type string — must match a member of the {@link TileType} union. */
   type: TileType;
+  /** Short human-readable name shown on the tile card, e.g. `'Recent Payments'`. */
   label: string;
+  /** The data-source service name, e.g. `'Stripe'` or `'Custom'`. */
   provider: string;
+  /** Emoji or symbol used as the tile card icon. */
   icon: string;
+  /** Category bucket the tile belongs to, used by the category sidebar filter. */
   category: Category;
+  /** Free-form keywords for the modal search bar. */
   tags: string[];
+  /** Whether the tile is fully implemented (`'available'`) or a placeholder (`'coming-soon'`). */
   status: 'available' | 'coming-soon';
+  /** One-line description shown on hover or in the tile card body. */
   description?: string;
 }
 
+/**
+ * Ordered list of category tabs shown in the Add Tile modal sidebar.
+ *
+ * The first entry is always `'all'` which acts as a "show everything" filter.
+ * Append a new `{ id, icon, label }` object here when introducing a new category.
+ */
 export const CATEGORIES: Array<{ id: Category; icon: string; label: string }> = [
   { id: 'all',            icon: '⊞',  label: 'All'            },
   { id: 'payments',       icon: '💳',  label: 'Payments'       },
@@ -28,6 +52,26 @@ export const CATEGORIES: Array<{ id: Category; icon: string; label: string }> = 
   { id: 'generic',        icon: '🌐',  label: 'Generic'        },
 ];
 
+/**
+ * Master registry of every tile type available in the dashboard.
+ *
+ * The Add Tile modal reads this array to build its catalogue. When you add a
+ * new tile type, append a {@link TileDefinition} entry here so it appears in
+ * the modal search and category filters.
+ *
+ * @example
+ * // Adding a new tile to the registry:
+ * TILE_REGISTRY.push({
+ *   type: 'my-provider-metric',
+ *   label: 'My Metric',
+ *   provider: 'MyProvider',
+ *   icon: '📊',
+ *   category: 'analytics',
+ *   tags: ['my-provider', 'metric'],
+ *   status: 'available',
+ *   description: 'Shows a key metric from MyProvider',
+ * });
+ */
 export const TILE_REGISTRY: TileDefinition[] = [
   // ── Stripe ──────────────────────────────────────────────────────────────────
   {
@@ -1221,5 +1265,156 @@ export const TILE_REGISTRY: TileDefinition[] = [
     tags: ['graphql', 'api', 'query', 'json'],
     status: 'available',
     description: 'Query any GraphQL endpoint with custom queries, variables, and headers',
+  },
+  // ── FLINT / LOPC e-commerce ───────────────────────────────────────────────────────────────
+  {
+    type: 'flint-auth',
+    label: 'FLINT Auth',
+    provider: 'FLINT',
+    icon: '🔐',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'auth'],
+    status: 'available',
+    description: 'FLINT session health — login, logout, token expiry',
+  },
+  {
+    type: 'flint-overview',
+    label: 'Store Overview',
+    provider: 'FLINT',
+    icon: '🛒',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'kpi', 'dashboard'],
+    status: 'available',
+    description: 'Today\'s KPIs — orders, revenue, new customers, low-stock count',
+  },
+  {
+    type: 'flint-orders',
+    label: 'Orders',
+    provider: 'FLINT',
+    icon: '📦',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'orders', 'fulfilment'],
+    status: 'available',
+    description: 'Full order pipeline — status filter, drawer, advance status, refund, cancel',
+  },
+  {
+    type: 'flint-products',
+    label: 'Products',
+    provider: 'FLINT',
+    icon: '🏷️',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'products', 'catalog'],
+    status: 'available',
+    description: 'Product catalog — edit, archive, manage variants',
+  },
+  {
+    type: 'flint-categories',
+    label: 'Categories',
+    provider: 'FLINT',
+    icon: '🗂️',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'categories', 'catalog'],
+    status: 'available',
+    description: 'Product category tree — inline edit, add, delete',
+  },
+  {
+    type: 'flint-inventory',
+    label: 'Inventory',
+    provider: 'FLINT',
+    icon: '📈',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'inventory', 'stock'],
+    status: 'available',
+    description: 'Inventory table with low-stock filter and inline stock edit',
+  },
+  {
+    type: 'flint-customers',
+    label: 'Customers',
+    provider: 'FLINT',
+    icon: '👥',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'customers', 'crm'],
+    status: 'available',
+    description: 'Customer list — profile, orders history, addresses in drawer',
+  },
+  {
+    type: 'flint-customer-reports',
+    label: 'Customer Reports',
+    provider: 'FLINT',
+    icon: '📊',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'customers', 'analytics'],
+    status: 'available',
+    description: 'Customer KPIs — active/inactive counts, 30-day new-customer sparkline',
+  },
+  {
+    type: 'flint-shipments',
+    label: 'Shipments',
+    provider: 'FLINT',
+    icon: '🚚',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'shipments', 'logistics'],
+    status: 'available',
+    description: 'Shipment list — tracking lookup, create shipment, update status',
+  },
+  {
+    type: 'flint-sales-chart',
+    label: 'Sales Chart',
+    provider: 'FLINT',
+    icon: '📉',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'sales', 'chart', 'revenue'],
+    status: 'available',
+    description: 'Date-range bar chart of daily revenue and order count',
+  },
+  {
+    type: 'flint-data-health',
+    label: 'Data Health',
+    provider: 'FLINT',
+    icon: '🩺',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'admin', 'diagnostics'],
+    status: 'available',
+    description: 'Diagnostic summary with traffic-light indicators and remediation actions',
+  },
+  {
+    type: 'flint-stripe-sync',
+    label: 'Stripe Sync',
+    provider: 'FLINT',
+    icon: '⚡',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'stripe', 'sync', 'admin'],
+    status: 'available',
+    description: 'Trigger Stripe payment sync — choose phase and view results',
+  },
+  {
+    type: 'flint-webhook-monitor',
+    label: 'Webhook Monitor',
+    provider: 'FLINT',
+    icon: '📶',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'webhooks', 'stripe', 'events'],
+    status: 'available',
+    description: 'Live Stripe webhook event log with inline JSON expand',
+  },
+  {
+    type: 'flint-order-search',
+    label: 'Order Search',
+    provider: 'FLINT',
+    icon: '🔍',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'orders', 'search'],
+    status: 'available',
+    description: 'On-demand order lookup by ID or customer email',
+  },
+  {
+    type: 'flint-order-receipt',
+    label: 'Order Receipt',
+    provider: 'FLINT',
+    icon: '🧾',
+    category: 'payments',
+    tags: ['flint', 'lopc', 'ecommerce', 'orders', 'receipt', 'detail'],
+    status: 'available',
+    description: 'Full receipt view for a single order — line items, totals, customer info, status timeline',
   },
 ];

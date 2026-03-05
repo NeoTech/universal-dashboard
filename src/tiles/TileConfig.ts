@@ -1,3 +1,10 @@
+/**
+ * Union of every valid tile type identifier in the dashboard.
+ *
+ * This is the single source of truth for tile type strings. When adding a new
+ * tile, append the new identifier here first — TypeScript will then surface
+ * all places that need updating (TILE_DEFAULTS, TILE_REGISTRY, renderTile, etc.).
+ */
 export type TileType =
   // ── Stripe ────────────────────────────────────────────────────────────────
   | 'stripe-payments'
@@ -152,48 +159,111 @@ export type TileType =
   | 'rest'
   | 'websocket'
   | 'custom-api'
-  | 'graphql';
+  | 'graphql'
+  // ── FLINT (LOPC e-commerce) ───────────────────────────────────────────────
+  | 'flint-auth'
+  | 'flint-overview'
+  | 'flint-sales-chart'
+  | 'flint-orders'
+  | 'flint-customers'
+  | 'flint-products'
+  | 'flint-categories'
+  | 'flint-inventory'
+  | 'flint-shipments'
+  | 'flint-customer-reports'
+  | 'flint-data-health'
+  | 'flint-stripe-sync'
+  | 'flint-webhook-monitor'
+  | 'flint-order-search'
+  | 'flint-order-receipt';
 
+/**
+ * Configuration for an RSS / Atom feed tile (`type === 'rss-feed'`).
+ */
 export interface RssTileConfig {
+  /** Full URL of the RSS or Atom feed, e.g. `'https://hnrss.org/frontpage'`. */
   url: string;
+  /** Maximum number of feed items to display (default: all returned by the feed). */
   maxItems?: number;
 }
 
+/**
+ * Configuration for a REST polling tile (`type === 'rest'`).
+ *
+ * The tile GETs the URL on each refresh interval and renders the JSON response
+ * as a table, raw JSON, or plain text depending on `displayMode`.
+ */
 export interface RestTileConfig {
+  /** Target HTTP endpoint to poll. Must be accessible from the browser or proxy. */
   url: string;
+  /** Optional HTTP headers sent with every request, e.g. `{ Authorization: 'Bearer ...' }`. */
   headers?: Record<string, string>;
+  /** Client-side poll interval in milliseconds. Overrides the tile's global `refreshInterval`. */
   refreshInterval?: number;
+  /** How to render the response body. */
   displayMode?: 'table' | 'json' | 'text';
   /** Dot-path field to extract numeric values for chart visualisation, e.g. "price" */
   chartField?: string;
   chartType?: 'line' | 'bar' | 'candle';
 }
 
+/**
+ * Configuration for a server-proxied Custom API tile (`type === 'custom-api'`).
+ *
+ * Unlike the REST tile, requests are forwarded through the backend server so
+ * CORS restrictions and secret headers never leak to the browser.
+ */
 export interface CustomApiTileConfig {
+  /** Target URL forwarded by the server proxy. */
   url: string;
+  /** HTTP method for the proxied request (default `'GET'`). */
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** Headers included in the proxied request — safe for secrets since they never reach the browser. */
   headers?: Record<string, string>;
+  /** Raw request body string (for POST/PUT/PATCH). */
   body?: string;
+  /** How to render the response body. */
   displayMode?: 'table' | 'json' | 'text' | 'key-value';
   /** Dot-path into the response to extract, e.g. "data.users" */
   dataPath?: string;
+  /** Client-side poll interval in milliseconds. */
   refreshInterval?: number;
 }
 
+/**
+ * Configuration for a GraphQL query tile (`type === 'graphql'`).
+ *
+ * The tile POSTs `{ query, variables }` to the endpoint on each refresh and
+ * renders the result. Arbitrary headers (including auth tokens) are supported.
+ */
 export interface GraphqlTileConfig {
+  /** GraphQL endpoint URL. */
   url: string;
+  /** GraphQL query string, e.g. `'query { viewer { login } }'`. */
   query: string;
   /** JSON string of GraphQL variables, e.g. `{"id": 42}` */
   variables?: string;
   /** Dot-path into the response to extract, e.g. "data.users" */
   dataPath?: string;
+  /** HTTP headers sent with the request, e.g. `{ Authorization: 'Bearer ...' }`. */
   headers?: Record<string, string>;
+  /** Client-side poll interval in milliseconds. */
   refreshInterval?: number;
+  /** How to render the response body. */
   displayMode?: 'table' | 'json' | 'text';
 }
 
+/**
+ * Configuration for a WebSocket stream tile (`type === 'websocket'`).
+ *
+ * The tile opens a persistent WebSocket connection and appends incoming
+ * messages to a ring buffer, rendering the latest `maxMessages` entries.
+ * Optional field extraction, column labels, and chart overlays are supported.
+ */
 export interface WsTileConfig {
+  /** WebSocket endpoint URL, e.g. `'wss://stream.binance.com:9443/ws/btcusdt@trade'`. */
   url: string;
+  /** Maximum number of messages kept in the display buffer (default: all messages). */
   maxMessages?: number;
   /**
    * Comma-separated dot-path field names to extract from each message and
@@ -213,8 +283,17 @@ export interface WsTileConfig {
   chartBufferMaxPoints?: number;
 }
 
+/**
+ * Full runtime configuration for a single dashboard tile.
+ *
+ * This is the persisted shape: it is saved to localStorage (keyed by workspace
+ * name) and synced to the server layout API. Every field except `id` and `type`
+ * is optional — sensible defaults come from {@link TILE_DEFAULTS}.
+ */
 export interface TileConfig {
+  /** UUID auto-generated by {@link makeTile}. Stable across saves. */
   id: string;
+  /** Tile type identifier — must be a member of the {@link TileType} union. */
   type: TileType;
   title?: string;
   x: number;
@@ -285,6 +364,13 @@ export interface TileConfig {
   deliveryMode?: 'poll' | 'webhook';
 }
 
+/**
+ * Default size and title for every tile type.
+ *
+ * Values here are applied by {@link makeTile} when the caller does not supply
+ * explicit `w`, `h`, or `title` overrides. All widths and heights are in
+ * pixels and will be snapped to the 16 px layout grid.
+ */
 export const TILE_DEFAULTS: Record<TileType, Partial<TileConfig>> = {
   // ── Stripe ────────────────────────────────────────────────────────────────
   'stripe-payments':           { w: 480, h: 320, title: 'Recent Payments' },
@@ -440,6 +526,22 @@ export const TILE_DEFAULTS: Record<TileType, Partial<TileConfig>> = {
   'websocket':                 { w: 400, h: 300, title: 'WebSocket Stream' },
   'custom-api':                { w: 480, h: 320, title: 'Custom API' },
   'graphql':                   { w: 480, h: 360, title: 'GraphQL' },
+  // ── FLINT ─────────────────────────────────────────────────────────────────
+  'flint-auth':             { w: 320, h: 200, title: 'FLINT Auth' },
+  'flint-overview':         { w: 560, h: 200, title: 'Store Overview' },
+  'flint-sales-chart':      { w: 560, h: 320, title: 'Sales Chart' },
+  'flint-orders':           { w: 640, h: 400, title: 'Orders' },
+  'flint-customers':        { w: 560, h: 360, title: 'Customers' },
+  'flint-products':         { w: 560, h: 400, title: 'Products' },
+  'flint-categories':       { w: 400, h: 360, title: 'Categories' },
+  'flint-inventory':        { w: 560, h: 360, title: 'Inventory' },
+  'flint-shipments':        { w: 560, h: 360, title: 'Shipments' },
+  'flint-customer-reports': { w: 480, h: 280, title: 'Customer Reports' },
+  'flint-data-health':      { w: 480, h: 360, title: 'Data Health' },
+  'flint-stripe-sync':      { w: 400, h: 260, title: 'Stripe Sync' },
+  'flint-webhook-monitor':  { w: 560, h: 360, title: 'Webhook Monitor' },
+  'flint-order-search':     { w: 400, h: 300, title: 'Order Search' },
+  'flint-order-receipt':    { w: 480, h: 480, title: 'Order Receipt' },
 };
 
 /**
@@ -577,9 +679,31 @@ export const TILE_POLL_MS: Partial<Record<TileType, number>> = {
   'producthunt-top-launches': 3_600_000,
   // Generic
   'rss-feed':               300_000,
+  // FLINT
+  'flint-auth':             0,
+  'flint-overview':         0,
+  'flint-orders':           0,
+  'flint-products':         0,
+  'flint-categories':       0,
+  'flint-customers':        0,
+  'flint-inventory':        0,
+  'flint-shipments':        0,
+  'flint-sales-chart':      0,
+  'flint-customer-reports': 0,
+  'flint-data-health':      0,
+  'flint-webhook-monitor':  0,
 };
 
-/** Snap a pixel value to the nearest grid unit */
+/**
+ * Snap a pixel value to the nearest grid unit.
+ *
+ * All tile positions and sizes are stored as multiples of 16 px so the layout
+ * stays aligned when tiles are dragged or resized.
+ *
+ * @param v    - Raw pixel value to snap.
+ * @param grid - Grid unit size in pixels (default `16`).
+ * @returns The nearest multiple of `grid`.
+ */
 export function snap(v: number, grid = 16): number {
   return Math.round(v / grid) * grid;
 }
@@ -599,7 +723,36 @@ export const TILE_SSE_CHANNEL: Partial<Record<TileType, string>> = {
   // Both UI-facing Reddit tile types share the same 'reddit-posts' SSE feed.
   'reddit-hot-posts':        'reddit-posts',
   'reddit-keyword-monitor':  'reddit-posts',
+  // FLINT tile types whose SSE channel name differs from the tile type string
+  'flint-auth':              'flint-session',
+  'flint-overview':          'flint-dashboard',
+  'flint-sales-chart':       'flint-sales',
+  'flint-customer-reports':  'flint-customer-report',
+  'flint-webhook-monitor':   'flint-webhooks',
 };
+
+/**
+ * Tile types that are websocket-managed and should not participate in
+ * dashboard poll scheduling controls.
+ */
+export const WS_MANAGED_TILES = new Set<TileType>([
+  'websocket',
+  'flint-auth',
+  'flint-overview',
+  'flint-sales-chart',
+  'flint-orders',
+  'flint-customers',
+  'flint-products',
+  'flint-categories',
+  'flint-inventory',
+  'flint-shipments',
+  'flint-customer-reports',
+  'flint-data-health',
+  'flint-stripe-sync',
+  'flint-webhook-monitor',
+  'flint-order-search',
+  'flint-order-receipt',
+]);
 
 /**
  * Tile types that support webhook-based push delivery as an alternative to
@@ -632,7 +785,17 @@ export const WEBHOOK_PROVIDER: Partial<Record<TileType, string>> = {
   'netlify-deployments': 'netlify',
 };
 
-/** Create a new TileConfig with sensible defaults */
+/**
+ * Create a new {@link TileConfig} with sensible defaults.
+ *
+ * Merges `TILE_DEFAULTS[type]` with the provided overrides then applies
+ * {@link snap} to `x`, `y`, `w`, and `h` so the tile is always grid-aligned.
+ * A fresh UUID is generated for `id` unless one is supplied in `overrides`.
+ *
+ * @param type      - The tile type to create.
+ * @param overrides - Partial config to merge on top of the defaults.
+ * @returns A fully populated {@link TileConfig} ready to add to the layout.
+ */
 export function makeTile(type: TileType, overrides: Partial<TileConfig> = {}): TileConfig {
   const defaults = TILE_DEFAULTS[type] ?? {};
   return {

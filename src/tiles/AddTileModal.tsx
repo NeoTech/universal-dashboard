@@ -4,12 +4,39 @@ import type { TileConfig } from './TileConfig';
 import { makeTile } from './TileConfig';
 import { TILE_REGISTRY, CATEGORIES, type TileDefinition, type Category } from './tileRegistry';
 
+/**
+ * Props accepted by {@link AddTileModal}.
+ */
 interface Props {
+  /** Whether the modal is currently visible. */
   isOpen: boolean;
+  /**
+   * Callback invoked when the user confirms adding a tile.
+   * @param tile - The fully constructed tile configuration to add.
+   */
   onAdd: (tile: TileConfig) => void;
+  /** Callback invoked when the user dismisses the modal without adding a tile. */
   onClose: () => void;
 }
 
+/**
+ * Tile picker modal for adding a new tile to the dashboard.
+ *
+ * **Single-screen picker** — when no tile type requiring configuration is
+ * selected, shows a two-column layout:
+ * - Left sidebar: category filter driven by `CATEGORIES` from `tileRegistry`.
+ * - Right grid: tiles grouped by provider, filtered by the active category or
+ *   by the free-text search query (matches label, provider, and tags).
+ *
+ * **Inline config overlay** — for `rest`, `websocket`, `rss-feed`, and
+ * `custom-api` tile types, selecting a tile replaces the picker with a minimal
+ * form collecting the required URL (and optional headers / max-messages). A
+ * “← Back” button returns to the picker without adding.
+ *
+ * **State is fully reset** on every close or successful add via `reset()`.
+ *
+ * @param props - `isOpen` flag, `onAdd` callback, `onClose` callback.
+ */
 export function AddTileModal(props: Props): JSX.Element {
   const [query, setQuery] = createSignal('');
   const [activeCategory, setActiveCategory] = createSignal<Category>('all');
@@ -41,6 +68,12 @@ export function AddTileModal(props: Props): JSX.Element {
     props.onClose();
   }
 
+  /**
+   * Memoized list of tiles matching the current search query and active category.
+   *
+   * When `query` is non-empty the category filter is bypassed and tiles are
+   * matched against label, provider, and tags.
+   */
   const filteredTiles = createMemo(() => {
     const q = query().toLowerCase().trim();
     const cat = activeCategory();
@@ -66,6 +99,16 @@ export function AddTileModal(props: Props): JSX.Element {
     return [...groups.entries()];
   });
 
+  /**
+   * Handle tile card selection.
+   *
+   * - Ignores `coming-soon` tiles.
+   * - For `rest`, `websocket`, `rss-feed`, and `custom-api`: shows the inline
+   *   config form instead of immediately adding.
+   * - For all other types: creates the tile via `makeTile` and calls `onAdd`.
+   *
+   * @param def - The selected tile definition from `TILE_REGISTRY`.
+   */
   function selectTile(def: TileDefinition): void {
     if (def.status === 'coming-soon') return;
     if (def.type === 'rest' || def.type === 'websocket' || def.type === 'rss-feed' || def.type === 'custom-api') {
@@ -77,6 +120,13 @@ export function AddTileModal(props: Props): JSX.Element {
     props.onClose();
   }
 
+  /**
+   * Confirm adding a tile after the inline config form is filled in.
+   *
+   * Constructs the appropriate `TileConfig` based on the selected tile type
+   * (`rss-feed`, `rest`, `custom-api`, or `websocket`), calls `onAdd`, and
+   * resets + closes the modal.
+   */
   function handleAdd(): void {
     const cfg = configuring();
     if (!cfg) return;

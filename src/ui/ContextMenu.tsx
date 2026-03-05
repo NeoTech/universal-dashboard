@@ -1,9 +1,13 @@
 import { createEffect, onCleanup, For, Show } from 'solid-js';
 import type { JSX, Accessor } from 'solid-js';
 
+/** A single item in a {@link ContextMenu}. */
 export interface MenuItem {
+  /** Stable identifier passed to the `onSelect` callback when clicked. */
   id: string;
+  /** Text displayed for this menu item. */
   label: string;
+  /** When `true` the item is rendered non-interactive and cannot be selected. */
   disabled?: boolean;
 }
 

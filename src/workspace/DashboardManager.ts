@@ -7,10 +7,14 @@
  */
 
 const STORAGE_KEY = 'twm:multi-dash';
+/** Maximum number of simultaneously open dashboards (hard limit). */
 export const MAX_DASHBOARDS = 4;
 
+/** Shape of the object persisted to `localStorage` under {@link STORAGE_KEY}. */
 interface PersistedState {
+  /** Ordered list of dashboard IDs. */
   ids: string[];
+  /** Zero-based index of the last-active dashboard. */
   activeIndex: number;
 }
 
@@ -18,6 +22,13 @@ export class DashboardManager {
   private _ids: string[];
   private _activeIndex: number;
 
+  /**
+   * Restore state from `localStorage` (key `twm:multi-dash`) or fall back to
+   * a single default dashboard (`"dashboard-1"`).
+   *
+   * The persisted `activeIndex` is clamped to the valid range in case a
+   * dashboard was deleted in a previous session.
+   */
   constructor() {
     const saved = _load();
     this._ids = saved.ids.length > 0 ? saved.ids : ['dashboard-1'];

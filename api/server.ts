@@ -52,6 +52,10 @@ import { register as registerWoocommerce } from './providers/woocommerce.ts';
 import { register as registerShopify } from './providers/shopify.ts';
 import { register as registerReddit } from './providers/reddit.ts';
 import { register as registerProducthunt } from './providers/producthunt.ts';
+import { register as registerFlint, flintFetch } from './providers/flint.ts';
+import { createWsServer, handleWsUpgrade, setTokenVerifier, broadcastCommandResult, broadcastCommandProgress, broadcastResource } from './ws/flint-hub.ts';
+import { recoverStuckCommands, startProcessingLoop, onCommandLifecycle, setCommandExecutor } from './providers/flint-queue.ts';
+import { purgeExpired } from './db/flint-db.ts';
 
 // ── Order workflow status store (SQLite via bun:sqlite) ───────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -269,7 +273,24 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 // ── Shared SSE broadcast infrastructure ──────────────────────────────────────
+/**
+ * The set of all currently connected SSE clients (one `ServerResponse` per tab).
+ * Entries are added in `handleSseStream()` and removed on the `close` event.
+ * `broadcastSse` and `broadcastSseEphemeral` iterate this set to fan-out events.
+ */
 const sseClients = new Set<ServerResponse>();
+
+/**
+ * Persistent SSE event cache: maps each SSE event/channel name to the most
+ * recently broadcast payload for that channel.
+ *
+ * - **Populated by** `broadcastSse()` on every successful poll cycle.
+ * - **Not written by** `broadcastSseEphemeral()` — ephemeral events are never cached.
+ * - **Consumed by** `handleSseStream()` which replays the entire cache to every
+ *   new SSE client so tiles render immediately without waiting for the next poll.
+ * - **Lifecycle**: entries live for the duration of the server process; there is
+ *   no TTL or eviction. Stale data is overwritten by the next successful fetch.
+ */
 const resourceCache = new Map<string, unknown>();
 
 /** Route handlers registered by provider modules — populated by startPollers(). */
@@ -355,12 +376,25 @@ const webhookMode = new Set<string>(_savedSettings.webhookChannels ?? []);
 // Ensure webhook channels are also reflected in pausedPollers on startup.
 for (const ch of webhookMode) pausedPollers.add(ch);
 
+/**
+ * Broadcast an SSE event to every connected client and **cache** the payload
+ * in `resourceCache` so it is replayed to clients that connect later.
+ *
+ * Use this for all regular poll results. The cache ensures that a freshly
+ * opened browser tab receives the current data instantly without waiting for
+ * the next poll cycle.
+ *
+ * @param event - SSE event name (also used as the `resourceCache` key).
+ * @param data  - JSON-serialisable payload broadcast to all clients.
+ */
 function broadcastSse(event: string, data: unknown): void {
   resourceCache.set(event, data);
   const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of [...sseClients]) {
     try { client.write(chunk); } catch { sseClients.delete(client); }
   }
+  // Also push to WebSocket subscribers (no-op when no one is subscribed)
+  broadcastResource(event, data);
 }
 
 /**
@@ -375,6 +409,21 @@ function broadcastSseEphemeral(event: string, data: unknown): void {
   }
 }
 
+/**
+ * Upgrade an HTTP connection to a persistent SSE stream.
+ *
+ * On connect the handler:
+ * 1. Writes the `text/event-stream` response headers.
+ * 2. Replays every entry in `resourceCache` so tiles receive current data
+ *    immediately without waiting for the next poll cycle.
+ * 3. Adds the response object to `sseClients` so future broadcasts reach it.
+ * 4. Starts a 25-second keepalive comment ping to prevent NAT/proxy timeouts.
+ * 5. Removes the client from `sseClients` and clears the keepalive timer when
+ *    the underlying TCP connection closes.
+ *
+ * @param req - The incoming HTTP request (used for IP logging and close detection).
+ * @param res - The HTTP response; left open as an SSE stream.
+ */
 function handleSseStream(req: IncomingMessage, res: ServerResponse): void {
   const clientIp = req.socket.remoteAddress ?? 'unknown';
   console.log(`  [sse]  client connected   ip=${clientIp}  total=${sseClients.size + 1}`);
@@ -393,7 +442,25 @@ function handleSseStream(req: IncomingMessage, res: ServerResponse): void {
   console.log(`  [sse]  replayed ${replayed} cached events to new client`);
   res.write(': connected\n\n');
   sseClients.add(res);
+  // Trigger immediate refreshes for channels that have active tiles but no
+  // cached data (e.g. a tile type added for the first time — the initial poll
+  // was skipped via hasActiveTiles because the DB row didn't exist yet).
+  // Use a short delay so the SSE headers are flushed before the first data.
+  setTimeout(() => {
+    for (const [ch, runFn] of refreshRegistry) {
+      if (!resourceCache.has(ch) && hasActiveTiles(ch)) {
+        void runFn();
+      }
+    }
+  }, 200);
+  // Keep the TCP connection alive so proxies/NAT gateways don't silently drop it.
+  // Without this, idle connections die after 30-120 s and browser EventSource
+  // reconnects are throttled to minutes when the tab is backgrounded.
+  const keepaliveTimer = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch { clearInterval(keepaliveTimer); }
+  }, 25_000);
   req.on('close', () => {
+    clearInterval(keepaliveTimer);
     sseClients.delete(res);
     console.log(`  [sse]  client disconnected ip=${clientIp}  total=${sseClients.size}`);
   });
@@ -549,7 +616,26 @@ function startPollers(): void {
   // Persist any newly auto-detected webhook channels.
   savePollSettings();
 
-  function poll(event: string, ms: number, fn: () => Promise<unknown>): void {
+    /**
+     * Register a recurring poller for an SSE channel inside the provider framework.
+     *
+     * Behaviour:
+     * - Runs `fn` **once immediately** (initial fetch / cache warm-up) regardless
+     *   of paused or webhook-mode state, so tiles populate on first load.
+     * - For webhook-mode channels the `setInterval` is skipped entirely; the
+     *   channel is refreshed on demand when a webhook arrives.
+     * - The effective interval is resolved as:
+     *   `pollerCustomIntervals.get(event) ?? ms`
+     *   allowing the client to override the default via `PATCH /api/poll/:event`.
+     * - The run function is stored in both `refreshRegistry` (for on-demand
+     *   `POST /api/refresh/:event`) and `pollerRunFns` (for `set-interval` ops).
+     *
+     * @param event - SSE event / channel name (e.g. `"stripe-payments"`).
+     * @param ms    - Default poll interval in milliseconds.
+     * @param fn    - Async function that fetches and returns the channel payload.
+     *               Its return value is passed directly to `broadcastSse()`.
+     */
+    function poll(event: string, ms: number, fn: () => Promise<unknown>, initialDelayMs = 0): void {
     const effectiveMs = pollerCustomIntervals.get(event) ?? ms;
     const isWebhook = webhookMode.has(event);
 
@@ -579,7 +665,13 @@ function startPollers(): void {
 
     // Always do one initial fetch to populate the SSE cache — even in webhook
     // mode tiles need data immediately on load without waiting for a webhook.
-    void run();
+    // initialDelayMs > 0 staggers aggregation pollers that depend on primary
+    // pollers being warm (avoids N simultaneous requests at startup).
+    if (initialDelayMs > 0) {
+      setTimeout(() => { void run(); }, initialDelayMs);
+    } else {
+      void run();
+    }
     // Skip the interval entirely for webhook-driven channels.
     if (!isWebhook) {
       pollerIntervals.set(event, setInterval(() => { if (!pausedPollers.has(event)) void run(); }, effectiveMs));
@@ -641,6 +733,7 @@ function startPollers(): void {
     registerShopify(ctx),
     registerReddit(ctx),
     registerProducthunt(ctx),
+    registerFlint(ctx),
   );
 
   console.log(`
@@ -1818,12 +1911,55 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 if ((import.meta as { main?: boolean }).main) {
   const PORT     = parseInt(process.env['API_PORT'] ?? '3001', 10);
   const API_HOST = process.env['API_HOST'] ?? '0.0.0.0';
-  httpCreateServer((req, res) => {
+
+  // ── WebSocket server (FLINT real-time) ────────────────────────────────────
+  createWsServer();
+  setTokenVerifier(verifyJwt);
+  recoverStuckCommands();
+
+  // Wire command executor: calls LOPC via flintFetch and returns parsed JSON
+  setCommandExecutor(async (method, path, payload) => {
+    const options: RequestInit = { method };
+    if (payload != null) {
+      options.body = JSON.stringify(payload);
+      options.headers = { 'Content-Type': 'application/json' };
+    }
+    const r = await flintFetch(path, options);
+    if (!r.ok) throw new Error(`FLINT ${r.status}: ${await r.text()}`);
+    return r.json();
+  });
+
+  startProcessingLoop();
+  onCommandLifecycle({
+    onStart: (row) => broadcastCommandProgress(row.id),
+    onComplete: (row) => {
+      broadcastCommandResult(row.id, 'completed', row.result ? JSON.parse(row.result) : undefined);
+      // Re-poll the affected resource so SSE + WS subscribers get fresh data
+      void refreshRegistry.get(row.resource)?.();
+    },
+    onFailed: (row) => broadcastCommandResult(row.id, 'failed', undefined, row.error ?? 'Unknown error'),
+  });
+
+  // Purge expired cache rows every 10 minutes
+  setInterval(purgeExpired, 10 * 60 * 1000);
+
+  const server = httpCreateServer((req, res) => {
     handleRequest(req, res).catch((err: unknown) => {
       console.error('API error:', err);
       json(res, 500, { error: 'Internal server error' });
     });
-  }).listen(PORT, API_HOST, () => {
+  });
+
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (url.pathname === '/ws/flint') {
+      handleWsUpgrade(req, socket, head);
+    } else {
+      socket.destroy();
+    }
+  });
+
+  server.listen(PORT, API_HOST, () => {
     startPollers();
 
     const e = process.env;

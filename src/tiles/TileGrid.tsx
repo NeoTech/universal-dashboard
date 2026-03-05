@@ -2,7 +2,7 @@ import { For, Show, createEffect, createSignal, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import type { JSX } from 'solid-js';
 import type { TileConfig } from './TileConfig';
-import { snap, TILE_POLL_MS, TILE_SSE_CHANNEL } from './TileConfig';
+import { snap, TILE_POLL_MS, TILE_SSE_CHANNEL, WS_MANAGED_TILES } from './TileConfig';
 import { TileRefreshTimer } from '../ui/TileRefreshTimer';
 import { TileConfigProvider } from './TileConfigContext';
 import { TileRefreshProvider } from './TileRefreshContext';
@@ -44,13 +44,23 @@ function TileFooter(p: { type: TileConfig['type'] }): JSX.Element {
   );
 }
 
+/**
+ * Props for the {@link TileGrid} component.
+ */
 interface Props {
+  /** Current tile layout; changes are reconciled into the internal store. */
   tiles: TileConfig[];
+  /** Called on every drag-drop or resize-release with the updated layout array. */
   onLayoutChange: (tiles: TileConfig[]) => void;
+  /** Factory that returns the JSX element for a given tile config. */
   renderTile: (tile: TileConfig) => JSX.Element;
+  /** Called when the user clicks the tile's × close button. */
   onRemoveTile?: (id: string) => void;
+  /** Called when the user clicks the tile's ⚙ configure button. */
   onConfigureTile?: (id: string) => void;
+  /** Called when a manual refresh is requested (button click or timer ring). */
   onRefreshTile?: (id: string) => void;
+  /** Returns `true` while the tile is being refreshed (spins the refresh button). */
   isRefreshingTile?: (id: string) => boolean;
   /** Called when the user ALT+drags a tile to a new position to copy it. */
   onTileCopy?: (sourceId: string, x: number, y: number) => void;
@@ -88,6 +98,23 @@ let copyDragState: {
 // Monotonically increasing counter so each "bring to front" gets a unique z-index.
 let zCounter = 0;
 
+/**
+ * Absolute-positioned canvas that renders, drags, resizes, and manages all
+ * dashboard tiles.
+ *
+ * Internally uses a SolidJS store so tile component instances are kept alive
+ * during drag and resize operations — the underlying tile data (SSE state,
+ * chart buffers, etc.) is never re-mounted while the user interacts with the
+ * layout.
+ *
+ * Interaction model:
+ * - **Drag to move**: `pointerdown` on `.tile__titlebar` → `pointermove` → `pointerup`.
+ * - **ALT+drag to copy**: same flow but triggers `onTileCopy` instead of a layout update.
+ * - **Resize**: `pointerdown` on `.tile__resize-handle` → `pointermove` → `pointerup`.
+ * - **Double-click canvas**: fires `onAddAtPosition` with the grid-snapped coordinates.
+ * - Layout change events are only emitted on pointer-up, not during move, to avoid
+ *   triggering provider API refetches while the user is still dragging.
+ */
 export function TileGrid(props: Props): JSX.Element {
   // ── Store keeps tile component instances alive across drag/resize ──────────
   const [tiles, setTiles] = createStore<TileConfig[]>([]);
@@ -111,10 +138,20 @@ export function TileGrid(props: Props): JSX.Element {
     setTiles(reconcile(props.tiles, { key: 'id', merge: true }));
   });
 
+  // ── Per-tile refresh debounce ──────────────────────────────────────────────
+  // Collapse rapid animationiteration bursts (e.g. when a display:none dashboard
+  // becomes visible after a long idle) into a single refresh per tile per 2 s.
+  // Without this, CSS animation suspension in background tabs causes a burst of
+  // queued events on reveal that can hammer providers and return empty results.
+  const refreshDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+
   /** Increment the per-tile counter (triggers self-polling tiles) then call parent. */
   function handleTileRefresh(tileId: string): void {
+    if (refreshDebounce.has(tileId)) return; // leading-edge: skip while window active
     setRefreshCounters(tileId, (c: number | undefined) => (c ?? 0) + 1);
     props.onRefreshTile?.(tileId);
+    const t = setTimeout(() => refreshDebounce.delete(tileId), 2_000);
+    refreshDebounce.set(tileId, t);
   }
 
   /** Snapshot store → plain array and tell parent (only called on pointer-up) */
@@ -267,7 +304,7 @@ export function TileGrid(props: Props): JSX.Element {
               on:pointerdown={(e: PointerEvent) => onDragPointerDown(e, tile)}
             >
               <span class="tile__title">{tile.title ?? tile.type}</span>
-              <Show when={(tile.refreshInterval ?? 1) > 0 && tile.deliveryMode !== 'webhook'}>
+              <Show when={!WS_MANAGED_TILES.has(tile.type) && (tile.refreshInterval ?? 1) > 0 && tile.deliveryMode !== 'webhook'}>
                 <TileRefreshTimer
                   intervalMs={tile.refreshInterval ?? TILE_POLL_MS[tile.type] ?? 60_000}
                   onRefresh={() => handleTileRefresh(tile.id)}

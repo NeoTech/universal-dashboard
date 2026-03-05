@@ -7,11 +7,9 @@
  */
 
 import { Database } from 'bun:sqlite';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const AUTH_DB_PATH = join(__dirname, '..', 'auth.db');
+const AUTH_DB_PATH = process.env['AUTH_DB_PATH']?.trim() || join(process.cwd(), 'auth.db');
 
 /**
  * Shared SQLite database connection for `auth.db`.

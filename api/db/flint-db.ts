@@ -12,8 +12,7 @@
 import { Database } from 'bun:sqlite';
 import { drizzle } from 'drizzle-orm/bun-sqlite';
 import { eq, lt } from 'drizzle-orm';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import * as schema from './flint-schema.ts';
 import type {
   FlintOrder,
@@ -25,8 +24,7 @@ import type {
   FlintCategory,
 } from '../../src/data/flint.ts';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, '..', '..', 'flint-cache.db');
+const DB_PATH = process.env['FLINT_DB_PATH']?.trim() || join(process.cwd(), 'flint-cache.db');
 
 // ── SQLite connection ─────────────────────────────────────────────────────────
 

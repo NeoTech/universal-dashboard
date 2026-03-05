@@ -1,8 +1,6 @@
 services:
   twm-local:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.all-in-one
+    image: dashboard:first
     env_file: .env
     environment:
       API_HOST: "0.0.0.0"
@@ -10,20 +8,27 @@ services:
       FRONTEND_PORT: "5187"
       TRAEFIK_WEB_PORT: "8080"
       TRAEFIK_ADMIN_PORT: "8081"
+      AUTH_DB_PATH: "/data/auth.db"
+      FLINT_DB_PATH: "/data/flint-cache.db"
+      ORDER_STATUS_DB_PATH: "/data/order-statuses.db"
       # Optional overrides (defaults come from .env via env_file above)
-      # NGROK_AUTHTOKEN: "${NGROK_AUTHTOKEN}"
+      NGROK_AUTHTOKEN: "${NGROK_AUTHTOKEN}"
       # NGROK_DOMAIN: "${NGROK_DOMAIN}"
-      # AUTH_ENABLED: "${AUTH_ENABLED}"
-      # JWT_SECRET: "${JWT_SECRET}"
+      AUTH_ENABLED: "${AUTH_ENABLED}"
+      JWT_SECRET: "${JWT_SECRET}"
       # APP_URL: "${APP_URL}"
       # SAML_CALLBACK_URL: "${SAML_CALLBACK_URL}"
-      # FLINT_FUNCTION_URL: "${FLINT_FUNCTION_URL}"
-      # FLINT_AUTH_EMAIL: "${FLINT_AUTH_EMAIL}"
-      # FLINT_AUTH_TOKEN: "${FLINT_AUTH_TOKEN}"
-      # STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY}"
-      # STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET}"
+      # SAML_ISSUER=tiling-dash-board
+      # SAML_IDP_METADATA_PATH=GoogleIDPMetadata.xml
+      FLINT_FUNCTION_URL: "${FLINT_FUNCTION_URL}"
+      FLINT_AUTH_EMAIL: "${FLINT_AUTH_EMAIL}"
+      FLINT_AUTH_TOKEN: "${FLINT_AUTH_TOKEN}"
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET}"
     ports:
       - "8080:8080"
       - "8081:8081"
       - "4040:4040"
+    volumes:
+      - ./data:/data
     restart: unless-stopped

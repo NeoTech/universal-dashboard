@@ -1,11 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import Stripe from 'stripe';
 import type { ServerContext, ProviderRouteHandler } from './types.ts';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Order workflow status types & store ───────────────────────────────────────
 
@@ -15,7 +12,8 @@ export type OrderWorkflowStatus = 'new' | 'processing' | 'packing' | 'shipped' |
 /** Persisted record for a single order's workflow state (stored in SQLite). */
 export interface OrderStatusEntry { status: OrderWorkflowStatus; updatedAt: number; note?: string }
 
-const db = new Database(join(__dirname, '..', 'order-statuses.db'), { create: true });
+const ORDER_STATUS_DB_PATH = process.env['ORDER_STATUS_DB_PATH']?.trim() || join(process.cwd(), 'order-statuses.db');
+const db = new Database(ORDER_STATUS_DB_PATH, { create: true });
 db.run(`CREATE TABLE IF NOT EXISTS order_statuses (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL,

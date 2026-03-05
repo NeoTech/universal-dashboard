@@ -18,6 +18,10 @@ test-results
 coverage
 e2e
 fixtures
+!e2e
+!e2e/**
+!fixtures
+!fixtures/**
 
 # Editor / OS
 .DS_Store

@@ -385,3 +385,15 @@ void loadWorkspacesFromServer(API_BASE_URL).then((serverWs) => {
 **Lesson (TWM-161 shipment UX):** Users need one-click flow from receipt to shipment creation. The reliable pattern is: if target tile is missing, add it, then pass prefill state via `flintStore` signal consumed by the target tile.
 
 **Rule:** Implement cross-tile handoffs with `useDashboardActions` + `makeTile(...)` + `flintStore` prefill signal. In target create forms, add lightweight autocomplete from existing cached resource data for UUID-heavy fields.
+
+## Bun-compiled frontend/backend reduce runtime lag
+
+**Lesson (TWM-162):** Running both frontend and backend as Bun-compiled binaries significantly improved runtime responsiveness versus script/interpreted startup paths. UI lag and interaction latency dropped noticeably.
+
+**Rule:** For local Docker and production-like runs where responsiveness matters, prefer Bun-compiled binaries for both frontend and backend. Keep non-compiled dev mode for iteration speed, but validate performance-sensitive behavior on the compiled path.
+
+## Local compile scripts must auto-target host architecture
+
+**Lesson (TWM-163):** Hardcoding Linux compile targets in local scripts creates incompatible binaries on Windows/macOS hosts and causes confusion between Docker and local runtime paths.
+
+**Rule:** For local `compile:*` scripts, do not pass `--target`; let Bun infer the current host OS/architecture. Keep explicit Linux targets only in Dockerfiles where the runtime target is known to be Linux.

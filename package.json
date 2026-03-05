@@ -6,6 +6,8 @@
     "dev": "vite",
     "api": "bun run api/server.ts",
     "watch-api": "bun api/watch.ts",
+    "compile:frontend": "bun run build && bun build ./docker/static-server.ts --compile --outfile ./dist/bin/frontend",
+    "compile:backend": "bun build ./api/server.ts --compile --outfile ./dist/bin/server",
     "build:backend": "bun build ./api/server.ts --target=bun --outfile ./dist/server.js",
     "prod:serve:backend": "bun run ./dist/server.js",
     "prod:backend": "bun run build:backend && bun run start:backend",
